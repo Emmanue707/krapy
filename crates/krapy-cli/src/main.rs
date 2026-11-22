@@ -44,6 +44,13 @@ enum Command {
         name: String,
         #[arg(long, value_enum, default_value_t = PresetArg::Balanced)]
         preset: PresetArg,
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = "",
+            help = "launch pair uri on phone via adb instead of QR"
+        )]
+        adb: Option<String>,
     },
     Connect {
         device: String,
@@ -56,12 +63,27 @@ enum Command {
         #[arg(long, default_value_t = 27183)]
         port: u16,
     },
+    Adb {
+        #[command(subcommand)]
+        cmd: AdbCommand,
+    },
     Alias {
         device: String,
         name: String,
     },
     Forget {
         device: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdbCommand {
+    Pair {
+        host_port: String,
+        code: String,
+    },
+    Connect {
+        host_port: String,
     },
 }
 
@@ -86,13 +108,22 @@ fn main() -> Result<()> {
     init_tracing(cli.verbose);
     match cli.cmd {
         Command::List => cmd::list::run(),
-        Command::Pair { port, name, preset } => cmd::pair::run(port, &name, preset.into()),
+        Command::Pair {
+            port,
+            name,
+            preset,
+            adb,
+        } => cmd::pair::run(port, &name, preset.into(), adb),
         Command::Connect {
             device,
             preset,
             port,
         } => cmd::connect::run(&device, preset.into(), port),
         Command::Doctor { port } => cmd::doctor::run(port),
+        Command::Adb { cmd } => match cmd {
+            AdbCommand::Pair { host_port, code } => cmd::adb::pair(&host_port, &code),
+            AdbCommand::Connect { host_port } => cmd::adb::connect(&host_port),
+        },
         Command::Alias { device, name } => cmd::alias::run(&device, &name),
         Command::Forget { device } => cmd::forget::run(&device),
     }

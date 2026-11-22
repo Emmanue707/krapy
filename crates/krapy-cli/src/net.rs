@@ -23,28 +23,6 @@ pub fn port_free_udp_tcp(port: u16) -> Result<()> {
     Ok(())
 }
 
-pub fn which(cmd: &str) -> bool {
-    let paths = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&paths) {
-        let candidate = dir.join(cmd);
-        if candidate.is_file() {
-            return true;
-        }
-    }
-    false
-}
-
-pub fn adb_version() -> Result<()> {
-    let output = std::process::Command::new("adb")
-        .arg("version")
-        .output()
-        .context("run adb version")?;
-    if !output.status.success() {
-        anyhow::bail!("adb version failed");
-    }
-    Ok(())
-}
-
 pub fn config_dir_writable() -> Result<()> {
     let dir = krapy_core::device::Store::config_dir()?;
     std::fs::create_dir_all(&dir).context("create config dir")?;

@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 krapy-core = { workspace = true }
+krapy-decode = { path = "../krapy-decode" }
+krapy-transport = { path = "../krapy-transport" }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
