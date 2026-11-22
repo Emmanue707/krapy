@@ -12,12 +12,7 @@ use krapy_transport::{Advertiser, Listener};
 use crate::mirror::{self, MirrorOpts};
 use crate::net;
 
-pub fn run(
-    port: u16,
-    name: &str,
-    opts: MirrorOpts,
-    adb_serial: Option<String>,
-) -> Result<()> {
+pub fn run(port: u16, name: &str, opts: MirrorOpts, adb_serial: Option<String>) -> Result<()> {
     let dir = Store::config_dir()?;
     let identity = Identity::load(&dir)?;
     let desktop_id = mirror::desktop_id_bytes(&identity.id())?;
@@ -30,10 +25,8 @@ pub fn run(
     let ip = net::primary_lan_ipv4().context("primary LAN IPv4")?;
     let id = identity.id();
     let n = urlencoding::encode(name);
-    let uri = format!(
-        "krapy://pair?v=1&h={ip}&p={port}&k={key_b64}&id={id}&n={n}"
-    );
-    println!("{uri}");
+    let uri = format!("krapy://pair?v=1&h={ip}&p={port}&k={key_b64}&id={id}&n={n}");
+    println!("uri: {uri}");
     if let Some(adb_serial) = adb_serial {
         let pref = if adb_serial.is_empty() {
             None
