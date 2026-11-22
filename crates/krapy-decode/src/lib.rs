@@ -1,3 +1,4 @@
+mod annex;
 mod i420;
 
 #[cfg(feature = "ffmpeg")]
