@@ -3,18 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>krapy — low-latency Android screen mirroring</title>
-  <meta name="description" content="Screen mirror your Android phone to a Rust desktop app over flaky Wi-Fi. Pair with a QR scan, no adb required.">
+  <title>krapy: low-latency Android screen mirroring over Wi-Fi</title>
+  <meta name="description" content="Free, open source Android screen mirroring to Windows, macOS and Linux. Built for flaky Wi-Fi and phone hotspots. Pair with a QR scan, no adb needed. A light scrcpy alternative.">
+  <link rel="canonical" href="https://krapy.waghitech.com/">
+  <meta name="robots" content="index, follow">
+  <meta name="theme-color" content="#1a6b4a">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="krapy">
+  <meta property="og:url" content="https://krapy.waghitech.com/">
+  <meta property="og:title" content="krapy: low-latency Android screen mirroring">
+  <meta property="og:description" content="Mirror your Android screen to your computer over flaky Wi-Fi and hotspots. QR pairing, Rust desktop app, tiny Kotlin phone app. Free and open source.">
+  <meta property="og:image" content="https://krapy.waghitech.com/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="krapy logo with the text: low-latency Android screen mirroring for flaky Wi-Fi and phone hotspots">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="krapy: low-latency Android screen mirroring">
+  <meta name="twitter:description" content="Mirror your Android screen to your computer over flaky Wi-Fi and hotspots. QR pairing, free and open source.">
+  <meta name="twitter:image" content="https://krapy.waghitech.com/og.png">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "krapy",
+    "description": "Low-latency Android screen mirroring for flaky Wi-Fi and phone hotspots, with QR pairing.",
+    "url": "https://krapy.waghitech.com/",
+    "image": "https://krapy.waghitech.com/og.png",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Android, Windows, macOS, Linux",
+    "softwareVersion": "0.1.1",
+    "license": "https://github.com/Emmanue707/krapy#license",
+    "codeRepository": "https://github.com/Emmanue707/krapy",
+    "downloadUrl": "https://github.com/Emmanue707/krapy/releases/latest",
+    "sameAs": "https://github.com/Emmanue707/krapy",
+    "author": {"@type": "Person", "name": "Emmanuel Kokele"},
+    "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+  }
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="wrap">
     <header class="site-head">
-      <img src="favicon.svg" width="32" height="32" alt="">
+      <img src="favicon.svg" width="32" height="32" alt="krapy logo">
       <span class="name">krapy</span>
     </header>
 
+    <main>
     <section class="hero" aria-labelledby="hero-heading">
       <h1 id="hero-heading">Mirror your Android screen without the lag.</h1>
       <p class="lead">Built for flaky Wi-Fi and phone hotspots. Rust desktop app, tiny Kotlin phone app. Scan a QR to pair. No adb or developer options unless you want the fallback.</p>
@@ -102,6 +140,8 @@
       <p>Get the Android APK and the desktop app for Linux, Windows or macOS from the <a href="https://github.com/Emmanue707/krapy/releases/latest">latest release</a>. Install the APK on the phone, run <code>krapy pair</code> on the computer, scan.</p>
       <p class="targets">Targets (not measured yet): under 50&nbsp;ms glass-to-glass on good Wi-Fi; under 30&nbsp;MB desktop RAM at idle.</p>
     </section>
+
+    </main>
 
     <footer class="site-foot">
       <p>krapy means mirror in Jiwaka language</p>
