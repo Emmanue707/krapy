@@ -1,3 +1,4 @@
+#[derive(Default)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
@@ -8,7 +9,9 @@ pub struct Frame {
     pub stride_uv: usize,
 }
 
-pub(crate) fn pack_yuv420p(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pack_yuv420p_into(
+    out: &mut Frame,
     y: &[u8],
     u: &[u8],
     v: &[u8],
@@ -16,26 +19,23 @@ pub(crate) fn pack_yuv420p(
     height: u32,
     y_stride: usize,
     uv_stride: usize,
-) -> Frame {
+) {
     let w = width as usize;
     let h = height as usize;
     let stride_y = w;
     let stride_uv = w / 2;
-    let mut out_y = vec![0u8; stride_y * h];
-    let mut out_u = vec![0u8; stride_uv * (h / 2)];
-    let mut out_v = vec![0u8; stride_uv * (h / 2)];
-    copy_plane(y, y_stride, &mut out_y, stride_y, w, h);
-    copy_plane(u, uv_stride, &mut out_u, stride_uv, w / 2, h / 2);
-    copy_plane(v, uv_stride, &mut out_v, stride_uv, w / 2, h / 2);
-    Frame {
-        width,
-        height,
-        y: out_y,
-        u: out_u,
-        v: out_v,
-        stride_y,
-        stride_uv,
-    }
+    let y_len = stride_y * h;
+    let uv_len = stride_uv * (h / 2);
+    out.width = width;
+    out.height = height;
+    out.stride_y = stride_y;
+    out.stride_uv = stride_uv;
+    out.y.resize(y_len, 0);
+    out.u.resize(uv_len, 0);
+    out.v.resize(uv_len, 0);
+    copy_plane(y, y_stride, &mut out.y, stride_y, w, h);
+    copy_plane(u, uv_stride, &mut out.u, stride_uv, w / 2, h / 2);
+    copy_plane(v, uv_stride, &mut out.v, stride_uv, w / 2, h / 2);
 }
 
 fn copy_plane(
