@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -39,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var emptyPeers: TextView
     private var peerRows: List<Peer> = emptyList()
     private var pendingPeer: Peer? = null
+    private var remoteHintText = "remote control needs accessibility (optional)"
     private val basePadH by lazy { dp(20) }
     private val basePadTop by lazy { dp(16) }
     private val basePadBottom by lazy { dp(20) }
@@ -147,6 +149,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        val prefs = uiPrefs()
+        if (prefs.getBoolean(PREF_SENT_TO_APP_INFO, false)) {
+            prefs.edit().putBoolean(PREF_SENT_TO_APP_INFO, false).apply()
+            if (!InputService.InputBridge.enabled()) {
+                remoteHintText = "turn on krapy"
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        }
         if (::remoteBlock.isInitialized) {
             refreshRemoteBlock()
         }
@@ -261,6 +271,16 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun uiPrefs() = getSharedPreferences(PREFS_UI, Context.MODE_PRIVATE)
+
+    private fun isPlayStoreInstall(): Boolean {
+        return try {
+            packageManager.getInstallSourceInfo(packageName).installingPackageName == "com.android.vending"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun refreshRemoteBlock() {
         remoteBlock.removeAllViews()
         if (InputService.InputBridge.enabled()) {
@@ -268,60 +288,46 @@ class MainActivity : Activity() {
             return
         }
         remoteBlock.visibility = View.VISIBLE
-        if (Build.VERSION.SDK_INT >= 33) {
-            remoteBlock.addView(TextView(this).apply {
-                text =
-                    "Android blocks this for sideloaded apps. Open App info, tap the ⋮ menu, " +
-                    "choose Allow restricted settings, then turn on krapy in Accessibility."
-                textSize = 13f
-                setTextColor(textSecondary())
-                setPadding(0, 0, 0, dp(8))
-            })
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-            }
-            row.addView(secondaryButton("App info") {
+        remoteBlock.addView(TextView(this).apply {
+            text = remoteHintText
+            textSize = 13f
+            setTextColor(textSecondary())
+            setPadding(0, 0, 0, dp(8))
+        })
+        remoteBlock.addView(secondaryButton("enable remote control") {
+            onEnableRemoteControlClicked()
+        })
+        remoteBlock.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(16),
+            )
+        })
+    }
+
+    private fun onEnableRemoteControlClicked() {
+        if (Build.VERSION.SDK_INT < 33 || isPlayStoreInstall()) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            return
+        }
+        val message =
+            "1. Settings > Apps > krapy (we open it for you).\n" +
+            "2. Tap the ⋮ menu (top right) > Allow restricted settings, then confirm with your PIN or fingerprint.\n" +
+            "3. Come back here and we open Accessibility: krapy > turn on.\n\n" +
+            "Mirroring works without this."
+        AlertDialog.Builder(this)
+            .setTitle("Allow remote control")
+            .setMessage(message)
+            .setPositiveButton("Continue") { _, _ ->
+                uiPrefs().edit().putBoolean(PREF_SENT_TO_APP_INFO, true).apply()
                 startActivity(
                     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                         data = Uri.fromParts("package", packageName, null)
                     },
                 )
-            }.apply {
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginEnd = dp(6)
-                }
-            })
-            row.addView(secondaryButton("Accessibility") {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            }.apply {
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(6)
-                }
-            })
-            remoteBlock.addView(row)
-            remoteBlock.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(16),
-                )
-            })
-        } else {
-            remoteBlock.addView(TextView(this).apply {
-                text = "remote control needs accessibility"
-                textSize = 13f
-                setTextColor(textSecondary())
-                setPadding(0, 0, 0, dp(8))
-            })
-            remoteBlock.addView(secondaryButton("enable remote control") {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            })
-            remoteBlock.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(16),
-                )
-            })
-        }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun startMirroring(peer: Peer) {
@@ -435,5 +441,7 @@ class MainActivity : Activity() {
         private const val REQ_SCAN = 1
         private const val REQ_CAPTURE = 2
         private const val REQ_NOTIF = 3
+        private const val PREFS_UI = "krapy_ui"
+        private const val PREF_SENT_TO_APP_INFO = "sent_to_app_info"
     }
 }
