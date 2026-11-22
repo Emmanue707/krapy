@@ -112,23 +112,31 @@ fn scan_nals(data: &[u8]) -> Vec<Vec<u8>> {
 
 fn annex_b_access_units(data: &[u8]) -> Vec<AccessUnit> {
     let nals = scan_nals(data);
-    let mut pending = Vec::new();
+    let mut sps_pps = Vec::new();
+    let mut config_armed = false;
     let mut aus = Vec::new();
     for nal in nals {
         let Some(ty) = nal_header(&nal) else {
             continue;
         };
         if ty == 7 || ty == 8 {
-            pending.extend_from_slice(&nal);
+            sps_pps.extend_from_slice(&nal);
+            config_armed = true;
             continue;
         }
         if ty == 5 {
-            if !pending.is_empty() {
+            if config_armed && !sps_pps.is_empty() {
                 aus.push(AccessUnit {
                     flags: FLAG_CODEC_CONFIG,
-                    data: pending.clone(),
+                    data: sps_pps.clone(),
                 });
-                pending.clear();
+                config_armed = false;
+            }
+            if let Some(last) = aus.last_mut()
+                && last.flags & FLAG_KEYFRAME != 0
+            {
+                last.data.extend_from_slice(&nal);
+                continue;
             }
             aus.push(AccessUnit {
                 flags: FLAG_KEYFRAME,
