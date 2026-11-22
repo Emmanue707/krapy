@@ -1,0 +1,119 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KRAPY_KEYSTORE_B64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/krapy.jks"
+      - name: build
+        working-directory: android
+        env:
+          KRAPY_KEYSTORE: ${{ runner.temp }}/krapy.jks
+          KRAPY_KEYSTORE_PASSWORD: ${{ secrets.KRAPY_KEYSTORE_PASSWORD }}
+          KRAPY_KEY_ALIAS: ${{ secrets.KRAPY_KEY_ALIAS }}
+          KRAPY_KEY_PASSWORD: ${{ secrets.KRAPY_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+      - name: check signature
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/krapy-*.apk)
+          "$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1)/apksigner" verify "$APK"
+          cp "$APK" krapy-${GITHUB_REF_NAME#v}.apk
+      - run: rm -f "$RUNNER_TEMP/krapy.jks"
+        if: always()
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: krapy-*.apk
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y nasm make pkg-config clang libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lean ffmpeg
+        run: scripts/build-ffmpeg.sh
+      - name: build
+        run: FFMPEG_DIR=$PWD/target/ffmpeg cargo build --release -p krapy-cli --no-default-features --features ffmpeg-static
+      - name: pack
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          mkdir krapy-$V-linux-x86_64
+          cp target/release/krapy README.md LICENSE-MIT LICENSE-APACHE krapy-$V-linux-x86_64/
+          tar czf krapy-$V-linux-x86_64.tar.gz krapy-$V-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: krapy-*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p krapy-cli --no-default-features --features openh264
+      - name: pack
+        shell: bash
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          mkdir krapy-$V-windows-x86_64
+          cp target/release/krapy.exe README.md LICENSE-MIT LICENSE-APACHE krapy-$V-windows-x86_64/
+          7z a krapy-$V-windows-x86_64.zip krapy-$V-windows-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: krapy-*.zip
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p krapy-cli --no-default-features --features openh264
+      - name: pack
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          mkdir krapy-$V-macos-aarch64
+          cp target/release/krapy README.md LICENSE-MIT LICENSE-APACHE krapy-$V-macos-aarch64/
+          tar czf krapy-$V-macos-aarch64.tar.gz krapy-$V-macos-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: krapy-*.tar.gz
+
+  publish:
+    needs: [apk, linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES=docs/releases/$GITHUB_REF_NAME.md
+          [ -f "$NOTES" ] || NOTES=/dev/null
+          gh release create "$GITHUB_REF_NAME" dist/* --title "krapy $GITHUB_REF_NAME" --notes-file "$NOTES" --verify-tag
