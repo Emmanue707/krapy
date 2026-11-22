@@ -114,6 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          NOTES=docs/releases/$GITHUB_REF_NAME.md
-          [ -f "$NOTES" ] || NOTES=/dev/null
+          NOTES=$RUNNER_TEMP/notes.md
+          cat "docs/releases/$GITHUB_REF_NAME.md" > "$NOTES" 2>/dev/null || true
+          grep -q "mirror in Jiwaka" "$NOTES" || printf '\nkrapy means mirror in Jiwaka language\n' >> "$NOTES"
           gh release create "$GITHUB_REF_NAME" dist/* --title "krapy $GITHUB_REF_NAME" --notes-file "$NOTES" --verify-tag
