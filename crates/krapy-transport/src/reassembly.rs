@@ -33,6 +33,7 @@ pub struct Reassembler {
     partials: Vec<Partial>,
     need_keyframe: bool,
     stats: ReassemblyStats,
+    out_buf: Vec<u8>,
 }
 
 impl Reassembler {
@@ -42,6 +43,7 @@ impl Reassembler {
             partials: Vec::new(),
             need_keyframe: false,
             stats: ReassemblyStats::default(),
+            out_buf: Vec::with_capacity(4096),
         }
     }
 
@@ -151,10 +153,13 @@ impl Reassembler {
         }
 
         self.last_completed = Some(done.frame_id);
-        let mut data = Vec::new();
+        self.out_buf.clear();
         for part in done.parts {
-            data.extend_from_slice(&part.expect("full"));
+            self.out_buf.extend_from_slice(&part.expect("full"));
         }
+        let cap = self.out_buf.capacity();
+        let data = std::mem::take(&mut self.out_buf);
+        self.out_buf = Vec::with_capacity(cap.max(4096));
 
         let is_key = done.flags & FLAG_KEYFRAME != 0;
         if self.need_keyframe && !is_key {
