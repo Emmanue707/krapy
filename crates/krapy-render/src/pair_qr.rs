@@ -23,7 +23,8 @@ pub fn pair_qr_frame(uri: &str) -> anyhow::Result<Frame> {
         for col in 0..px {
             let mx = col / SCALE;
             let my = row / SCALE;
-            let lum = if mx < QUIET || my < QUIET || mx >= QUIET + modules || my >= QUIET + modules {
+            let lum = if mx < QUIET || my < QUIET || mx >= QUIET + modules || my >= QUIET + modules
+            {
                 255u8
             } else {
                 let qx = mx - QUIET;

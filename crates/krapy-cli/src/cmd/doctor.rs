@@ -49,15 +49,14 @@ pub(crate) fn firewall_hint(port: u16) -> String {
             linux_firewall_allow(port)
         )
     } else if cfg!(target_os = "macos") {
-        "if sessions fail to connect: allow krapy in System Settings → Network → Firewall".to_string()
+        "if sessions fail to connect: allow krapy in System Settings → Network → Firewall"
+            .to_string()
     } else if cfg!(target_os = "windows") {
         format!(
             "if sessions fail to connect: netsh advfirewall firewall add rule name=krapy dir=in action=allow protocol=TCP localport={port} && netsh advfirewall firewall add rule name=krapy-udp dir=in action=allow protocol=UDP localport={port}"
         )
     } else {
-        format!(
-            "if sessions fail to connect: allow UDP/TCP port {port} in the local firewall"
-        )
+        format!("if sessions fail to connect: allow UDP/TCP port {port} in the local firewall")
     }
 }
 
