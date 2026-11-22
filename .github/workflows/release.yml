@@ -12,8 +12,8 @@ jobs:
   apk:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -44,7 +44,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y nasm make pkg-config clang libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - name: lean ffmpeg
@@ -65,7 +65,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p krapy-cli --no-default-features --features openh264
       - name: pack
@@ -83,7 +83,7 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p krapy-cli --no-default-features --features openh264
       - name: pack
@@ -102,7 +102,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: dist
