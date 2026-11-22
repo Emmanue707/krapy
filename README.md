@@ -47,16 +47,32 @@ MediaProjection -> MediaCodec H.264  --UDP-->  reassemble -> decode -> wgpu
 | `crates/krapy-render` | winit + wgpu window, input, clipboard |
 | `android/` | the phone app |
 | `web/` | krapy.waghitech.com |
+| `scripts/` | lean FFmpeg build |
 
-## Prerequisites
+## Download
 
-Desktop:
+Grab the latest release: https://github.com/Emmanue707/krapy/releases/latest
+
+- `krapy-<version>.apk` for the phone (Android 10 or newer)
+- `krapy-<version>-linux-x86_64.tar.gz`, `-windows-x86_64.zip`, `-macos-aarch64.tar.gz` for the desktop
+
+The Linux build has a minimal FFmpeg (H.264 decoder only) linked in
+statically. Windows and macOS builds use openh264 for now.
+
+`adb` is only needed for the adb fallback.
+
+## Build from source
+
 - Rust (stable)
-- FFmpeg dev libraries and pkg-config, for the default decoder.
-  Debian/Ubuntu: `sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev`.
-- `adb` only if you want the adb fallback.
+- Lean static FFmpeg (recommended, needs `make` and `nasm`):
 
-Phone: Android 10 or newer.
+  ```
+  scripts/build-ffmpeg.sh
+  FFMPEG_DIR=$PWD/target/ffmpeg cargo build --release -p krapy-cli --no-default-features --features ffmpeg-static
+  ```
+
+- Or against system FFmpeg (Debian/Ubuntu: `sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev`), `cargo build --release`.
+- Or no FFmpeg at all: `cargo build --release -p krapy-cli --no-default-features --features openh264`.
 
 ## Quickstart
 
@@ -107,22 +123,24 @@ The preset is the ceiling. Adaptive control moves below it.
 
 Targets: under 50 ms glass-to-glass on good Wi-Fi, under 30 MB desktop RAM.
 
-Measured so far:
+Measured so far, on one Linux VPS (4 vCPU, no GPU), `krapy pair --no-window
+--stats` over loopback, fed by `examples/fakephone.rs` with a 1280x720 60 fps
+4 Mbps single-slice H.264 clip. Software decode, no window, no real phone.
 
-All on one Linux VPS (4 vCPU, no GPU), `krapy pair --no-window --stats`
-over loopback, fed by `examples/fakephone.rs` with a 1280x720 60 fps
-4 Mbps H.264 clip, software decode via FFmpeg. No window, no real phone.
+| build | idle RSS | peak RSS | decode | avg CPU |
+|-------|----------|----------|--------|---------|
+| lean static FFmpeg (`ffmpeg-static`) | 5.7 MB | 19.8 to 20.9 MB | 3.2 ms | 24% of one core |
+| openh264 (`openh264`) | 7.0 MB | 30.0 to 30.3 MB | 4.2 ms | 28% |
+| system FFmpeg 6.1 (default) | 20.4 MB | 36.0 to 36.4 MB | 3.2 ms | 25% |
 
-| what | measured |
-|------|----------|
-| desktop peak RSS | 36.2 to 36.6 MB (over the 30 MB target) |
-| desktop CPU | 54 to 60% of one core, nearly all software decode |
-| decode time | 8.9 to 10.0 ms per frame |
-| frames in / decoded | 57 to 59 fps |
+All three hold 57 to 59 fps. Most of the system FFmpeg cost is shared
+libraries the distro build drags in (x265, rsvg, glib, icu).
+
+| other | measured |
+|-------|----------|
 | loopback RTT / jitter | 0.3 to 1.0 ms / 0.1 to 0.4 ms |
 | with 3% packet loss | bitrate stepped 8 Mbps to the 0.5 Mbps floor in about 3 s |
-| release binary | 8.9 MB |
-| release APK (unsigned) | 521 KB |
+| release APK (signed) | 525 KB |
 
 Reproduce:
 
@@ -151,7 +169,7 @@ cd android
 - [ ] test on real phones and hotspots, fix what breaks
 - [ ] measure glass-to-glass latency
 - [ ] hardware decode (VAAPI, VideoToolbox, D3D11)
-- [ ] signed APK and desktop binaries on GitHub releases
+- [x] signed APK and desktop binaries on GitHub releases
 
 ## License
 
