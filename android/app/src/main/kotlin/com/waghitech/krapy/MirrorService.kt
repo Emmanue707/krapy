@@ -82,6 +82,7 @@ class MirrorService : Service(), LinkCallbacks {
             stopSession("restarted")
         }
         peer = p
+        activePeerName = p.name
         peersDb = Peers(this)
         startForegroundNotif(p.name, false)
         captureBaseNs = System.nanoTime()
@@ -343,6 +344,7 @@ class MirrorService : Service(), LinkCallbacks {
         if (!running.getAndSet(false)) {
             return
         }
+        activePeerName = null
         reconnecting.set(false)
         reconnectThread?.interrupt()
         reconnectThread = null
@@ -447,6 +449,9 @@ class MirrorService : Service(), LinkCallbacks {
 
         @Volatile
         var lastPhoneClipboardSent: String? = null
+
+        @Volatile
+        var activePeerName: String? = null
 
         fun start(context: Context, peerId: String, resultCode: Int, data: Intent) {
             val i = Intent(context, MirrorService::class.java).apply {
