@@ -1,4 +1,4 @@
-use krapy_decode::{open, Decoder};
+use krapy_decode::{Decoder, open};
 
 const CLIP: &[u8] = include_bytes!("data/clip.h264");
 const W: u32 = 160;

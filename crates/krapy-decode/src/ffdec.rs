@@ -1,6 +1,7 @@
-use crate::i420::{pack_yuv420p, Frame};
 use crate::Decoder;
-use anyhow::{anyhow, Result};
+use crate::i420::{Frame, pack_yuv420p};
+use anyhow::{Result, anyhow};
+use ffmpeg_next::Error as FfmpegError;
 use ffmpeg_next::codec::context::Context;
 use ffmpeg_next::codec::flag::Flags;
 use ffmpeg_next::codec::id::Id;
@@ -9,7 +10,6 @@ use ffmpeg_next::packet::Packet;
 use ffmpeg_next::software::scaling::{context::Context as Scaler, flag::Flags as ScaleFlags};
 use ffmpeg_next::util::format::pixel::Pixel;
 use ffmpeg_next::util::frame::video::Video as VideoFrame;
-use ffmpeg_next::Error as FfmpegError;
 use std::sync::Once;
 
 static INIT: Once = Once::new();

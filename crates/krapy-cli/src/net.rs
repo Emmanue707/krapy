@@ -28,13 +28,14 @@ pub fn config_dir_writable() -> Result<()> {
     std::fs::create_dir_all(&dir).context("create config dir")?;
     let probe = dir.join(".write_probe");
     std::fs::write(&probe, b"x").context("write probe file")?;
-    std::fs::remove_file(probe).or_else(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
-    .context("remove probe file")?;
+    std::fs::remove_file(probe)
+        .or_else(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .context("remove probe file")?;
     Ok(())
 }

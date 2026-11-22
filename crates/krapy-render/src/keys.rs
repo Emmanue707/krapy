@@ -20,9 +20,18 @@ mod tests {
 
     #[test]
     fn key_table() {
-        assert_eq!(named_key_action(&Key::Named(NamedKey::Escape)), Some(KEY_BACK));
-        assert_eq!(named_key_action(&Key::Named(NamedKey::Home)), Some(KEY_HOME));
-        assert_eq!(named_key_action(&Key::Named(NamedKey::F1)), Some(KEY_RECENTS));
+        assert_eq!(
+            named_key_action(&Key::Named(NamedKey::Escape)),
+            Some(KEY_BACK)
+        );
+        assert_eq!(
+            named_key_action(&Key::Named(NamedKey::Home)),
+            Some(KEY_HOME)
+        );
+        assert_eq!(
+            named_key_action(&Key::Named(NamedKey::F1)),
+            Some(KEY_RECENTS)
+        );
         assert_eq!(named_key_action(&Key::Named(NamedKey::Space)), None);
     }
 }

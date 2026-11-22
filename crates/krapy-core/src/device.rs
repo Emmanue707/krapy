@@ -97,8 +97,7 @@ pub struct Store {
 
 impl Store {
     pub fn config_dir() -> Result<PathBuf> {
-        let dirs = directories::ProjectDirs::from("", "", "krapy")
-            .context("resolve config dir")?;
+        let dirs = directories::ProjectDirs::from("", "", "krapy").context("resolve config dir")?;
         Ok(dirs.config_dir().to_path_buf())
     }
 

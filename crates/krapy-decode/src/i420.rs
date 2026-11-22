@@ -38,7 +38,14 @@ pub(crate) fn pack_yuv420p(
     }
 }
 
-fn copy_plane(src: &[u8], src_stride: usize, dst: &mut [u8], dst_stride: usize, w: usize, h: usize) {
+fn copy_plane(
+    src: &[u8],
+    src_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    w: usize,
+    h: usize,
+) {
     for row in 0..h {
         let s = row * src_stride;
         let d = row * dst_stride;

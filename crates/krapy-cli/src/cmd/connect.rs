@@ -5,14 +5,9 @@ use krapy_transport::{Advertiser, Listener};
 
 use crate::mirror::{self, MirrorOpts};
 
-fn resolve_device<'a>(
-    store: &'a Store,
-    device: Option<&str>,
-) -> Result<&'a PairedDevice> {
+fn resolve_device<'a>(store: &'a Store, device: Option<&str>) -> Result<&'a PairedDevice> {
     match device {
-        Some(d) => store
-            .find(d)
-            .with_context(|| format!("unknown device {d}")),
+        Some(d) => store.find(d).with_context(|| format!("unknown device {d}")),
         None => match store.devices().len() {
             0 => bail!("no paired devices — run krapy pair first"),
             1 => Ok(&store.devices()[0]),

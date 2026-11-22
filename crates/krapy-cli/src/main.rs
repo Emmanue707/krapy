@@ -112,13 +112,8 @@ struct StreamArgs {
 
 #[derive(Subcommand)]
 enum AdbCommand {
-    Pair {
-        host_port: String,
-        code: String,
-    },
-    Connect {
-        host_port: String,
-    },
+    Pair { host_port: String, code: String },
+    Connect { host_port: String },
 }
 
 fn default_desktop_name() -> String {
@@ -154,11 +149,9 @@ fn main() -> Result<()> {
     init_tracing(cli.verbose);
     match cli.cmd {
         Command::List => cmd::list::run(),
-        Command::Pair {
-            stream,
-            name,
-            adb,
-        } => cmd::pair::run(stream.port, &name, stream_opts(&stream), adb),
+        Command::Pair { stream, name, adb } => {
+            cmd::pair::run(stream.port, &name, stream_opts(&stream), adb)
+        }
         Command::Connect { device, stream } => {
             cmd::connect::run(device, stream.port, stream_opts(&stream))
         }

@@ -1,8 +1,8 @@
-use crate::i420::{pack_yuv420p, Frame};
 use crate::Decoder;
-use anyhow::{anyhow, Result};
-use openh264::formats::YUVSource;
+use crate::i420::{Frame, pack_yuv420p};
+use anyhow::{Result, anyhow};
 use openh264::decoder::Decoder as OhDecoder;
+use openh264::formats::YUVSource;
 
 pub struct OpenH264Decoder {
     inner: OhDecoder,

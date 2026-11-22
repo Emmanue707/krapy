@@ -47,7 +47,10 @@ pub fn run(port: u16) -> Result<()> {
         }
         false => {
             failed = true;
-            println!("fail  port {} bindable — pick another --port or free the port", port);
+            println!(
+                "fail  port {} bindable — pick another --port or free the port",
+                port
+            );
             if let Err(e) = net::port_free_udp_tcp(port) {
                 println!("      {}", e);
             }

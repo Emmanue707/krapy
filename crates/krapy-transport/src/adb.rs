@@ -25,7 +25,10 @@ pub struct MdnsService {
 pub fn on_path() -> bool {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&paths) {
-        if dir.join(if cfg!(windows) { "adb.exe" } else { "adb" }).is_file() {
+        if dir
+            .join(if cfg!(windows) { "adb.exe" } else { "adb" })
+            .is_file()
+        {
             return true;
         }
     }

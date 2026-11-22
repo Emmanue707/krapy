@@ -116,11 +116,7 @@ impl ApplicationHandler<Wake> for KrapyApp {
             .with_title(format!("krapy - {}", self.device_name))
             .with_inner_size(LogicalSize::new(480.0, 854.0))
             .with_resizable(true);
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("create window"),
-        );
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let gpu = Gpu::new(window.clone()).expect("gpu");
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -141,12 +137,7 @@ impl ApplicationHandler<Wake> for KrapyApp {
         let _ = event_loop;
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {

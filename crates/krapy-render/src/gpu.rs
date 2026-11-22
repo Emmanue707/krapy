@@ -64,13 +64,14 @@ impl Gpu {
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("krapy"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: Default::default(),
-            trace: wgpu::Trace::Off,
-        }))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("krapy"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+                trace: wgpu::Trace::Off,
+            }))?;
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -202,7 +203,14 @@ impl Gpu {
         let y = self.y_tex.as_ref().expect("y");
         let u = self.u_tex.as_ref().expect("u");
         let v = self.v_tex.as_ref().expect("v");
-        upload_plane(&self.queue, y, &frame.y, frame.stride_y, frame.width, frame.height);
+        upload_plane(
+            &self.queue,
+            y,
+            &frame.y,
+            frame.stride_y,
+            frame.width,
+            frame.height,
+        );
         let hw = frame.width / 2;
         let hh = frame.height / 2;
         upload_plane(&self.queue, u, &frame.u, frame.stride_uv, hw, hh);
@@ -210,7 +218,10 @@ impl Gpu {
     }
 
     pub fn draw(&mut self, viewport: crate::letterbox::Viewport) -> anyhow::Result<()> {
-        let y = self.y_tex.as_ref().ok_or_else(|| anyhow::anyhow!("no frame"))?;
+        let y = self
+            .y_tex
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no frame"))?;
         let u = self.u_tex.as_ref().expect("u");
         let v = self.v_tex.as_ref().expect("v");
         let yv = y.create_view(&Default::default());
