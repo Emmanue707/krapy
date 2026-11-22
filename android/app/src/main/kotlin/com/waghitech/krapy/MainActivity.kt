@@ -1,10 +1,14 @@
 package com.waghitech.krapy
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -17,13 +21,12 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
-
 class MainActivity : Activity() {
     private lateinit var peers: Peers
     private lateinit var listView: ListView
     private lateinit var uriField: EditText
     private var peerRows: List<Peer> = emptyList()
-
+    private var pendingPeer: Peer? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         peers = Peers(this)
@@ -86,6 +89,7 @@ class MainActivity : Activity() {
         }
         refreshList()
         handlePairIntent(intent)
+        maybeRequestNotif()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -100,6 +104,32 @@ class MainActivity : Activity() {
             val uri = data?.getStringExtra("uri")
             if (uri != null) pairUri(uri) else Toast.makeText(this, "no uri", Toast.LENGTH_SHORT).show()
         }
+        if (requestCode == REQ_CAPTURE) {
+            val peer = pendingPeer
+            pendingPeer = null
+            if (peer == null) return
+            if (resultCode != RESULT_OK || data == null) {
+                Toast.makeText(this, "capture denied", Toast.LENGTH_SHORT).show()
+                return
+            }
+            MirrorService.start(this, peer.id, resultCode, data)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIF) {
+            val peer = pendingPeer
+            if (peer != null) beginCapture(peer)
+        }
+    }
+
+    private fun maybeRequestNotif() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
     }
 
     private fun startScan() {
@@ -119,10 +149,12 @@ class MainActivity : Activity() {
     private fun pairUri(raw: String) {
         try {
             val data = Pairing.parse(raw)
-            peers.upsert(peers.fromPairing(data))
+            val peer = peers.fromPairing(data)
+            peers.upsert(peer)
             uriField.setText("")
             refreshList()
             Toast.makeText(this, "paired ${data.desktopName}", Toast.LENGTH_SHORT).show()
+            startMirroring(peer)
         } catch (e: PairingException) {
             Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
         }
@@ -142,7 +174,20 @@ class MainActivity : Activity() {
     }
 
     private fun startMirroring(peer: Peer) {
-        Toast.makeText(this, "mirror ${peer.name} (later)", Toast.LENGTH_SHORT).show()
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingPeer = peer
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+            return
+        }
+        beginCapture(peer)
+    }
+
+    private fun beginCapture(peer: Peer) {
+        pendingPeer = peer
+        val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
     }
 
     private fun confirmForget(peer: Peer) {
@@ -158,5 +203,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_SCAN = 1
+        private const val REQ_CAPTURE = 2
+        private const val REQ_NOTIF = 3
     }
 }
