@@ -14,6 +14,7 @@ pub struct NetWindow {
     frames_completed: u32,
     frames_dropped: u32,
     late_frames: u32,
+    total_dropped: u64,
 }
 
 impl NetWindow {
@@ -45,6 +46,12 @@ impl NetWindow {
 
     pub fn note_frame_dropped(&mut self) {
         self.frames_dropped += 1;
+        self.late_frames += 1;
+        self.total_dropped += 1;
+    }
+
+    pub fn total_dropped(&self) -> u64 {
+        self.total_dropped
     }
 
     pub fn note_late_frame(&mut self) {
@@ -106,6 +113,43 @@ mod tests {
         assert!(stats.rtt_ms > 0.0);
         assert!(stats.jitter_ms >= 0.0);
         assert!((stats.loss - 1.0 / 11.0).abs() < 0.01);
+        assert_eq!(stats.late_frames, 2);
+    }
+
+    #[test]
+    fn reassembler_drops_feed_loss_and_late() {
+        use crate::reassembly::Reassembler;
+        use crate::wire::Datagram;
+        use std::borrow::Cow;
+
+        fn frag(id: u32, idx: u16, count: u16, flags: u8, data: &[u8]) -> Datagram<'static> {
+            Datagram::Video {
+                frame_id: id,
+                idx,
+                count,
+                flags,
+                capture_us: id as u64 * 1_000,
+                data: Cow::Owned(data.to_vec()),
+            }
+        }
+
+        let mut r = Reassembler::new();
+        let mut w = NetWindow::new();
+        w.window_start = Some(Instant::now());
+
+        let prev = r.stats().frames_dropped;
+        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"));
+        let _ = r.ingest(&frag(2, 0, 2, 0, b"x"));
+        let _ = r.ingest(&frag(2, 1, 2, 0, b"y"));
+        let new = r.stats().frames_dropped;
+        for _ in 0..(new - prev) {
+            w.note_frame_dropped();
+        }
+        assert_eq!(w.total_dropped(), 2);
+
+        w.frames_completed = 4;
+        let stats = w.tick(Instant::now() + WINDOW).expect("window");
+        assert!((stats.loss - 2.0 / 6.0).abs() < 0.01);
         assert_eq!(stats.late_frames, 2);
     }
 }
