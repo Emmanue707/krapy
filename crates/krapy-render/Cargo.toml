@@ -14,3 +14,4 @@ pollster = "0.4"
 arboard = "3"
 krapy-decode = { path = "../krapy-decode", default-features = false }
 krapy-transport = { path = "../krapy-transport" }
+qrcode = { workspace = true }

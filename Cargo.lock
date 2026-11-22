@@ -1311,6 +1311,7 @@ dependencies = [
  "krapy-decode",
  "krapy-transport",
  "pollster",
+ "qrcode",
  "wgpu",
  "winit",
 ]
