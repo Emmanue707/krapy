@@ -180,6 +180,25 @@ cargo build --release --example fakephone
 
 Glass-to-glass latency has not been measured yet. That needs a real phone.
 
+## Troubleshooting
+
+**QR won't scan.** Update the phone app to the latest release. Use the QR
+shown in the krapy mirror window (often easier than the terminal), or copy the
+`uri:` line printed above the QR and use **Paste link instead** in the app.
+
+**Phone can't reach the PC.** Phone and desktop must be on the same network
+(not guest Wi-Fi with client isolation). On Fedora allow the port:
+
+```
+sudo firewall-cmd --add-port=27183/tcp --add-port=27183/udp
+sudo firewall-cmd --permanent --add-port=27183/tcp --add-port=27183/udp && sudo firewall-cmd --reload
+```
+
+On Ubuntu: `sudo ufw allow 27183/tcp` and `sudo ufw allow 27183/udp`. On
+Windows (admin cmd): `netsh advfirewall firewall add rule name=krapy dir=in
+action=allow protocol=TCP localport=27183` and the same with `protocol=UDP`.
+Run `krapy doctor` for a quick local check.
+
 ## Build the phone app
 
 ```
