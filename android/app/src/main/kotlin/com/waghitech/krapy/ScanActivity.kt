@@ -2,12 +2,15 @@ package com.waghitech.krapy
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
-import android.view.Surface
+import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -15,24 +18,30 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.Image
 import android.media.ImageReader
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Size
+import android.view.Gravity
+import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.NotFoundException
-import com.google.zxing.common.HybridBinarizer
-import com.google.zxing.qrcode.QRCodeReader
-import com.google.zxing.PlanarYUVLuminanceSource
 import kotlin.math.abs
+import kotlin.math.max
 
 class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var texture: TextureView
+    private lateinit var status: TextView
+    private lateinit var root: FrameLayout
     private var camThread: HandlerThread? = null
     private var camHandler: Handler? = null
     private var decThread: HandlerThread? = null
@@ -43,24 +52,60 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
     private var previewSurface: Surface? = null
     @Volatile private var decoding = false
     @Volatile private var done = false
-    private val qr = QRCodeReader()
-    private val hints = mapOf(
-        DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-        DecodeHintType.TRY_HARDER to false,
-    )
+    private val mainHandler = Handler(android.os.Looper.getMainLooper())
+    private val basePadH by lazy { dp(16) }
+    private val basePadBottom by lazy { dp(12) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setResult(RESULT_CANCELED)
         texture = TextureView(this).apply {
-            layoutParams = ViewGroup.LayoutParams(
+            layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
-        setContentView(texture)
+        status = TextView(this).apply {
+            text = "point at the QR from krapy pair"
+            textSize = 14f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+        }
+        val pasteBtn = secondaryButton("paste link instead") { showPasteDialog() }
+        val strip = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { setColor(0x99000000.toInt()) }
+            addView(status)
+            addView(pasteBtn.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(4)
+                    leftMargin = dp(12)
+                    rightMargin = dp(12)
+                    bottomMargin = dp(8)
+                }
+            })
+        }
+        root = FrameLayout(this).apply {
+            addView(texture)
+            addView(strip, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM,
+            ))
+        }
+        applyWindowInsets(strip)
+        setContentView(root)
         decThread = HandlerThread("qr-decode").also { it.start() }
         decHandler = Handler(decThread!!.looper)
+        mainHandler.postDelayed({
+            if (!done) {
+                status.text =
+                    "still looking: hold the phone 20-30 cm away, fill the frame with the QR"
+            }
+        }, 15_000L)
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             texture.surfaceTextureListener = this
         } else {
@@ -89,6 +134,7 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         decThread?.quitSafely()
         decThread = null
         decHandler = null
@@ -107,6 +153,34 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
     }
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
 
+    private fun showPasteDialog() {
+        val input = EditText(this).apply {
+            setSingleLine()
+            val clip = (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+            val prefilled = clip?.getItemAt(0)?.coerceToText(this@ScanActivity)?.toString()
+            if (prefilled != null && prefilled.startsWith("krapy://")) {
+                setText(prefilled)
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Paste pairing link")
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val text = input.text.toString().trim()
+                if (text.isEmpty()) return@setPositiveButton
+                deliverUri(text)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun deliverUri(text: String) {
+        if (done) return
+        done = true
+        setResult(RESULT_OK, Intent().putExtra("uri", text))
+        finish()
+    }
+
     private fun startCamera(surface: SurfaceTexture) {
         val mgr = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val id = mgr.cameraIdList.firstOrNull { cid ->
@@ -117,7 +191,16 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
             finish()
             return
         }
-        val map = mgr.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+        val chars = mgr.getCameraCharacteristics(id)
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
+        val afMode = when {
+            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE in afModes ->
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO in afModes ->
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            else -> CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+        }
         val decodeSize = closest(map.getOutputSizes(ImageFormat.YUV_420_888), 1280, 720)
         val previewSize = pickPreview(map.getOutputSizes(SurfaceTexture::class.java), decodeSize)
         surface.setDefaultBufferSize(previewSize.width, previewSize.height)
@@ -139,6 +222,7 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
                 decHandler?.post {
                     try {
                         scanFrame(image)
+                    } catch (_: Throwable) {
                     } finally {
                         image.close()
                         decoding = false
@@ -158,6 +242,7 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
                             val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                                 addTarget(preview)
                                 addTarget(reader!!.surface)
+                                set(CaptureRequest.CONTROL_AF_MODE, afMode)
                             }.build()
                             s.setRepeatingRequest(req, null, camHandler)
                         }
@@ -185,25 +270,22 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
 
     private fun scanFrame(image: Image) {
         val y = image.planes[0]
-        val buf = y.buffer
-        val row = y.rowStride
         val w = image.width
         val h = image.height
-        val data = ByteArray(row * h)
-        buf.position(0)
-        buf.get(data)
-        val src = PlanarYUVLuminanceSource(data, row, h, 0, 0, w, h, false)
-        val text = try {
-            qr.decode(BinaryBitmap(HybridBinarizer(src)), hints).text
-        } catch (_: NotFoundException) {
-            return
-        } catch (_: Exception) {
+        val lum = luminance(y.buffer, y.rowStride, y.pixelStride, w, h)
+        val text = decode(lum, w, h) ?: return
+        if (!text.startsWith("krapy://pair")) {
+            runOnUiThread {
+                if (!done) status.text = "not a krapy QR"
+            }
             return
         }
-        if (!text.startsWith("krapy://pair")) return
         try {
             Pairing.parse(text)
-        } catch (_: PairingException) {
+        } catch (e: PairingException) {
+            runOnUiThread {
+                if (!done) status.text = e.message ?: "invalid QR"
+            }
             return
         }
         runOnUiThread {
@@ -240,6 +322,59 @@ class ScanActivity : Activity(), TextureView.SurfaceTextureListener {
         val pool = if (near.isNotEmpty()) near else sizes.toList()
         return pool.minBy { it.width * it.height }
     }
+
+    private fun applyWindowInsets(strip: LinearLayout) {
+        val padBottom = basePadBottom
+        if (Build.VERSION.SDK_INT >= 30) {
+            strip.setOnApplyWindowInsetsListener { v, insets ->
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                val ime = insets.getInsets(WindowInsets.Type.ime())
+                val cutout = insets.getInsets(WindowInsets.Type.displayCutout())
+                val bottom = max(bars.bottom, ime.bottom)
+                v.setPadding(
+                    basePadH + max(bars.left, cutout.left),
+                    v.paddingTop,
+                    basePadH + max(bars.right, cutout.right),
+                    padBottom + bottom,
+                )
+                insets
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            strip.setOnApplyWindowInsetsListener { v, insets ->
+                val sys = insets.systemWindowInsets
+                v.setPadding(
+                    basePadH + sys.left,
+                    v.paddingTop,
+                    basePadH + sys.right,
+                    padBottom + sys.bottom,
+                )
+                insets
+            }
+        }
+        strip.requestApplyInsets()
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun accentColor(): Int = getColor(R.color.accent)
+
+    private fun secondaryButton(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            minHeight = dp(44)
+            setTextColor(accentColor())
+            background = GradientDrawable().apply {
+                setStroke(dp(1), Color.WHITE)
+                cornerRadius = dp(8).toFloat()
+                setColor(0)
+            }
+            stateListAnimator = null
+            elevation = 0f
+            setOnClickListener { onClick() }
+        }
 
     companion object {
         private const val REQ_PERM = 2
