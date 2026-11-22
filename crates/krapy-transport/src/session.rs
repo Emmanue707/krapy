@@ -380,6 +380,7 @@ fn udp_loop(
     let mut last_keyframe = Instant::now() - KEYFRAME_MIN;
     let mut last_ping = Instant::now() - PING_INTERVAL;
     let mut ping_id: u32 = 0;
+    let epoch = Instant::now();
     let mut buf = [0u8; 2048];
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -392,7 +393,7 @@ fn udp_loop(
         if last_ping.elapsed() >= PING_INTERVAL {
             if let Some(addr) = phone_addr.lock().ok().and_then(|g| *g) {
                 ping_id = ping_id.wrapping_add(1);
-                let t_us = now.elapsed().as_micros() as u64;
+                let t_us = now.duration_since(epoch).as_micros() as u64;
                 let ping = Datagram::Ping { id: ping_id, t_us };
                 let _ = send_udp(&udp, &mut ping_sealer, addr, &ping);
             }
@@ -428,7 +429,7 @@ fn udp_loop(
                         ref data,
                         ..
                     } => {
-                        let arrival_us = now.elapsed().as_micros() as u64;
+                        let arrival_us = epoch.elapsed().as_micros() as u64;
                         if let Ok(mut nw) = stats.lock() {
                             nw.note_video_arrival(capture_us, arrival_us);
                         }
@@ -454,7 +455,7 @@ fn udp_loop(
                         let _ = data;
                     }
                     Datagram::Pong { id, t_us } => {
-                        let now_us = Instant::now().elapsed().as_micros() as u64;
+                        let now_us = epoch.elapsed().as_micros() as u64;
                         if now_us >= t_us {
                             let rtt = Duration::from_micros(now_us - t_us);
                             if let Ok(mut nw) = stats.lock() {
@@ -697,15 +698,22 @@ mod tests {
                 false
             })
         };
-        let mut pseal = Sealer::new(&keys.udp_p2d);
-        let pong_t = Instant::now().elapsed().as_micros() as u64;
-        let pong = Datagram::Pong {
-            id: 1,
-            t_us: pong_t,
+        let mut popen = Opener::new(&keys.udp_d2p);
+        udp.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut rbuf = [0u8; 2048];
+        let (id, t_us) = loop {
+            let n = udp.recv(&mut rbuf).expect("ping");
+            let mut body = vec![rbuf[0]];
+            body.extend(popen.open_udp(&rbuf[..n]).expect("open"));
+            if let Ok(Datagram::Ping { id, t_us }) = wire::decode_datagram_body(&body) {
+                break (id, t_us);
+            }
         };
-        send_phone(&udp, &dest, &mut pseal, &pong);
+        thread::sleep(Duration::from_millis(5));
+        send_phone(&udp, &dest, &mut useal, &Datagram::Pong { id, t_us });
         thread::sleep(Duration::from_millis(300));
-        assert!(session.stats_window.lock().expect("st").rtt_ms() >= 0.0);
+        assert!(session.stats_window.lock().expect("st").rtt_ms() >= 5.0);
         assert!(kf_h.join().expect("kf"));
         session.stop();
     }
