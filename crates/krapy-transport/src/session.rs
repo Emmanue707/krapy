@@ -58,12 +58,13 @@ impl LatestFrame {
 
 pub struct Session {
     pub control_tx: Sender<Control>,
-    pub control_rx: Receiver<Control>,
+    pub control_rx: Option<Receiver<Control>>,
     pub frames: Arc<LatestFrame>,
     pub stats_window: Arc<Mutex<NetWindow>>,
     stop: Arc<AtomicBool>,
     handles: Mutex<Option<Vec<JoinHandle<()>>>>,
     phone_id: [u8; 8],
+    phone_name: String,
 }
 
 impl Session {
@@ -71,7 +72,27 @@ impl Session {
         self.phone_id
     }
 
+    pub fn phone_name(&self) -> &str {
+        &self.phone_name
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
     pub fn stop(self) {
+        self.join_transport();
+    }
+
+    pub fn take_control_rx(&mut self) -> Option<Receiver<Control>> {
+        self.control_rx.take()
+    }
+
+    pub fn join_transport(self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(mut h) = self.handles.lock()
             && let Some(handles) = h.take()
@@ -80,6 +101,7 @@ impl Session {
                 let _ = j.join();
             }
         }
+        let _ = self.control_rx;
     }
 }
 
@@ -217,12 +239,13 @@ impl Listener {
         let stop_tx = stop;
         Ok(Session {
             control_tx,
-            control_rx,
+            control_rx: Some(control_rx),
             frames,
             stats_window,
             stop: stop_tx,
             handles: Mutex::new(Some(vec![tcp_h, udp_h, watch_h])),
             phone_id: hello.phone_id,
+            phone_name: hello.name,
         })
     }
 }
@@ -323,6 +346,7 @@ fn tcp_loop(
             let _ = out.send(msg);
         }
     }
+    stop.store(true, Ordering::Relaxed);
 }
 
 fn send_control(
@@ -452,6 +476,7 @@ fn udp_loop(
             Err(_) => break,
         }
     }
+    stop.store(true, Ordering::Relaxed);
 }
 
 type LastUdp = Instant;
@@ -500,6 +525,7 @@ fn watch_loop(last_udp: Arc<Mutex<LastUdp>>, stop: Arc<AtomicBool>) {
             .map(|t| t.elapsed() > UDP_SILENCE)
             .unwrap_or(false);
         if silent {
+            stop.store(true, Ordering::Relaxed);
             break;
         }
         thread::sleep(Duration::from_millis(100));
