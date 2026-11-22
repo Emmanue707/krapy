@@ -1,3 +1,4 @@
+pub mod adaptive;
 pub mod backoff;
 pub mod preset;
 
