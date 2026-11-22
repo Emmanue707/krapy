@@ -11,9 +11,7 @@ use krapy_core::device::{PairedDevice, Store};
 use krapy_core::preset::{Preset, Quality};
 use krapy_decode::{Decoder, open};
 use krapy_render::FrameSource;
-use krapy_transport::{
-    AcceptMode, CompleteFrame, Control, Listener, Session, SessionError,
-};
+use krapy_transport::{AcceptMode, CompleteFrame, Control, Listener, Session, SessionError};
 
 const PAIR_WINDOW: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(5);
@@ -98,7 +96,6 @@ impl<T> LatestSlot<T> {
 struct Counters {
     frames_in: AtomicU64,
     frames_out: AtomicU64,
-    dropped: AtomicU64,
     decode_us: AtomicU64,
     decode_samples: AtomicU64,
     e2e_us: AtomicU64,
@@ -111,7 +108,6 @@ impl Counters {
         Self {
             frames_in: AtomicU64::new(0),
             frames_out: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
             decode_us: AtomicU64::new(0),
             decode_samples: AtomicU64::new(0),
             e2e_us: AtomicU64::new(0),
@@ -312,9 +308,7 @@ fn network_loop(
             && let Some(net) = nw.tick(now)
             && let Some(q) = adaptive.on_window(net, now)
         {
-            counters
-                .bitrate
-                .store(q.bitrate as u64, Ordering::Relaxed);
+            counters.bitrate.store(q.bitrate as u64, Ordering::Relaxed);
             let _ = control_tx.send(Control::Quality {
                 bitrate: q.bitrate,
                 fps: q.fps,
@@ -399,9 +393,13 @@ fn stats_loop(
         let es = counters.e2e_samples.load(Ordering::Relaxed).max(1);
         let e2e_ms = counters.e2e_us.load(Ordering::Relaxed) as f64 / es as f64 / 1000.0;
         let bitrate = counters.bitrate.load(Ordering::Relaxed);
+        let dropped = stats_win
+            .lock()
+            .ok()
+            .map(|w| w.total_dropped())
+            .unwrap_or(0);
         println!(
-            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={} decode={decode_ms:.1}ms e2e={e2e_ms:.1}ms",
-            counters.dropped.load(Ordering::Relaxed)
+            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={dropped} decode={decode_ms:.1}ms e2e={e2e_ms:.1}ms",
         );
     }
 }
