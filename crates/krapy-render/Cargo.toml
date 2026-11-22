@@ -7,3 +7,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+winit = { version = "0.30", default-features = true }
+wgpu = "26"
+pollster = "0.4"
+arboard = "3"
+krapy-decode = { path = "../krapy-decode", default-features = false }
+krapy-transport = { path = "../krapy-transport" }
