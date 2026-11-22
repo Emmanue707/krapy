@@ -1,6 +1,7 @@
 # krapy
 
-Low-latency Android screen mirroring for flaky Wi-Fi and phone hotspots.
+Low-latency Android screen mirroring to Windows, macOS and Linux, built for
+flaky Wi-Fi and phone hotspots. A light, open source scrcpy alternative.
 
 *Krapy* means mirror in Jiwaka, from Jiwaka Province in Papua New Guinea.
 
