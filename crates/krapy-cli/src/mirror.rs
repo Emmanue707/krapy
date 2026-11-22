@@ -146,6 +146,7 @@ pub fn run_pair_then_connect(
     control_slot: ControlSlot,
     k: [u8; 32],
     opts: MirrorOpts,
+    phone_connected: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     let deadline = Instant::now() + PAIR_WINDOW;
     let secret_cell = Arc::new(Mutex::new(None::<[u8; 32]>));
@@ -164,7 +165,12 @@ pub fn run_pair_then_connect(
             k,
             on_paired: &mut cb,
         }) {
-            Ok(s) => break s,
+            Ok(s) => {
+                if let Some(flag) = &phone_connected {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                break s;
+            }
             Err(SessionError::HandshakeTimeout) => continue,
             Err(e) => return Err(anyhow::anyhow!("{e:?}")),
         }
@@ -445,11 +451,20 @@ pub fn headless_pair(
     store: Store,
     k: [u8; 32],
     opts: MirrorOpts,
+    phone_connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let source = FrameSource::new();
     let slot: ControlSlot = Arc::new(Mutex::new(None));
     install_ctrlc();
-    run_pair_then_connect(listener, store, source, slot, k, opts)
+    run_pair_then_connect(
+        listener,
+        store,
+        source,
+        slot,
+        k,
+        opts,
+        Some(phone_connected),
+    )
 }
 
 pub fn window_pair(
@@ -457,14 +472,20 @@ pub fn window_pair(
     store: Store,
     k: [u8; 32],
     title: &str,
+    pair_uri: &str,
     opts: MirrorOpts,
+    phone_connected: Arc<AtomicBool>,
 ) -> Result<()> {
     let source = FrameSource::new();
+    if let Ok(frame) = krapy_render::pair_qr_frame(pair_uri) {
+        source.publish(frame);
+    }
     let (ui_tx, slot) = spawn_control_bridge();
     let source_c = source.clone();
+    let connected = Arc::clone(&phone_connected);
     install_ctrlc();
     thread::spawn(move || {
-        let _ = run_pair_then_connect(listener, store, source_c, slot, k, opts);
+        let _ = run_pair_then_connect(listener, store, source_c, slot, k, opts, Some(connected));
     });
     krapy_render::run(source, title, ui_tx)
 }
