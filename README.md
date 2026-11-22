@@ -1,0 +1,158 @@
+# krapy
+
+Low-latency Android screen mirroring for flaky Wi-Fi and phone hotspots.
+
+A small Rust desktop app and a tiny Kotlin phone app. Scan a QR code to pair.
+No adb, no developer options. If the phone's IP changes it finds the desktop
+again over mDNS instead of freezing.
+
+Status: v0.1, early. It builds and the protocol is tested end to end on
+loopback. It has not been tested against a real phone yet.
+
+Site: https://krapy.waghitech.com
+
+## How it works
+
+```
+phone (Kotlin)                                desktop (Rust)
+MediaProjection -> MediaCodec H.264  --UDP-->  reassemble -> decode -> wgpu
+                 (hardware, low latency)       (drop late)   (ffmpeg)  (YUV shader)
+       ^                                                         |
+       +----------- TCP control: quality, keyframe, input -------+
+```
+
+- The phone encodes in hardware with a short GOP, no B-frames, and sends each
+  frame as soon as it leaves the encoder.
+- Video goes over UDP in fragments of at most 1100 bytes. A lost packet never
+  stalls newer frames; incomplete older frames are dropped and a keyframe is
+  requested.
+- At most one frame waits between each stage on the desktop. The newest
+  frame always wins.
+- YUV goes straight to the GPU. Colour conversion happens in a shader.
+- The desktop measures RTT, jitter and loss every 500 ms and sends a new
+  bitrate/fps. It steps down fast and climbs back slowly.
+- Everything is encrypted with ChaCha20-Poly1305. Keys come from the one-time
+  key in the QR code. See [docs/protocol.md](docs/protocol.md).
+
+## Layout
+
+| path | what |
+|------|------|
+| `crates/krapy-cli` | the `krapy` binary |
+| `crates/krapy-core` | presets, adaptive bitrate, backoff, paired devices |
+| `crates/krapy-transport` | crypto, wire format, reassembly, session, mDNS, adb |
+| `crates/krapy-decode` | `Decoder` trait, ffmpeg (default) and openh264 backends |
+| `crates/krapy-render` | winit + wgpu window, input, clipboard |
+| `android/` | the phone app |
+| `web/` | krapy.waghitech.com |
+
+## Prerequisites
+
+Desktop:
+- Rust (stable)
+- FFmpeg dev libraries and pkg-config, for the default decoder.
+  Debian/Ubuntu: `sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev`.
+- `adb` only if you want the adb fallback.
+
+Phone: Android 10 or newer.
+
+## Quickstart
+
+```
+cargo build --release
+./target/release/krapy doctor
+./target/release/krapy pair
+```
+
+Open the app, tap Scan QR, point it at the terminal. Mirroring starts.
+
+Next time:
+
+```
+krapy connect            # or: krapy connect <alias>
+```
+
+Other commands:
+
+```
+krapy list                      # paired phones, adb devices
+krapy alias <device> <name>
+krapy forget <device>
+krapy pair --adb [serial]       # send the pairing link over adb, no scan
+krapy adb pair <host:port> <code>
+krapy adb connect <host:port>
+```
+
+Useful flags: `--preset high-quality|balanced|low-latency|hotspot`,
+`--bitrate`, `--fps`, `--max-size`, `--decoder ffmpeg|openh264`, `--stats`,
+`--no-window`.
+
+Touch and key input from the desktop need the krapy accessibility service
+turned on in the phone's settings. Viewing works without it.
+
+## Presets
+
+| preset | bitrate | fps | max size |
+|--------|---------|-----|----------|
+| high-quality | 16 Mbps | 60 | 1920 |
+| balanced | 8 Mbps | 60 | 1600 |
+| low-latency | 4 Mbps | 60 | 1280 |
+| hotspot | 2 Mbps | 30 | 960 |
+
+The preset is the ceiling. Adaptive control moves below it.
+
+## Targets and measurements
+
+Targets: under 50 ms glass-to-glass on good Wi-Fi, under 30 MB desktop RAM.
+
+Measured so far:
+
+All on one Linux VPS (4 vCPU, no GPU), `krapy pair --no-window --stats`
+over loopback, fed by `examples/fakephone.rs` with a 1280x720 60 fps
+4 Mbps H.264 clip, software decode via FFmpeg. No window, no real phone.
+
+| what | measured |
+|------|----------|
+| desktop peak RSS | 36.2 to 36.6 MB (over the 30 MB target) |
+| desktop CPU | 54 to 60% of one core, nearly all software decode |
+| decode time | 8.9 to 10.0 ms per frame |
+| frames in / decoded | 57 to 59 fps |
+| loopback RTT / jitter | 0.3 to 1.0 ms / 0.1 to 0.4 ms |
+| with 3% packet loss | bitrate stepped 8 Mbps to the 0.5 Mbps floor in about 3 s |
+| release binary | 8.9 MB |
+| release APK (unsigned) | 521 KB |
+
+Reproduce:
+
+```
+cargo build --release --example fakephone
+./target/release/krapy pair --no-window --stats
+./target/release/examples/fakephone '<uri from pair>' clip.h264 --fps 60 --seconds 10
+```
+
+Glass-to-glass latency has not been measured yet. That needs a real phone.
+
+## Build the phone app
+
+```
+cd android
+./gradlew assembleRelease
+```
+
+## Roadmap to v0.1
+
+- [x] protocol, crypto and framing, tested on both sides with shared vectors
+- [x] desktop: pair, connect, doctor, list, adb helpers
+- [x] desktop: decode, render, input, clipboard, adaptive bitrate
+- [x] phone: QR pairing, capture, encode, stream, reconnect over mDNS
+- [x] phone: accessibility input, clipboard
+- [ ] test on real phones and hotspots, fix what breaks
+- [ ] measure glass-to-glass latency
+- [ ] hardware decode (VAAPI, VideoToolbox, D3D11)
+- [ ] signed APK and desktop binaries on GitHub releases
+
+## License
+
+MIT or Apache-2.0, at your option. See LICENSE-MIT and LICENSE-APACHE.
+
+Copyright (c) 2026 Emmanuel Kokele.
