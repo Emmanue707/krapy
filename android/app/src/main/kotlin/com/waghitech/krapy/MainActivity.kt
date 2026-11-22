@@ -239,7 +239,7 @@ class MainActivity : Activity() {
             peers.upsert(peer)
             uriField.setText("")
             refreshList()
-            refreshStatus()
+            statusLine.text = "connecting to ${data.desktopName}…"
             Toast.makeText(this, "paired ${data.desktopName}", Toast.LENGTH_SHORT).show()
             startMirroring(peer)
         } catch (e: PairingException) {
