@@ -98,8 +98,6 @@ struct Counters {
     frames_out: AtomicU64,
     decode_us: AtomicU64,
     decode_samples: AtomicU64,
-    e2e_us: AtomicU64,
-    e2e_samples: AtomicU64,
     bitrate: AtomicU64,
 }
 
@@ -110,8 +108,6 @@ impl Counters {
             frames_out: AtomicU64::new(0),
             decode_us: AtomicU64::new(0),
             decode_samples: AtomicU64::new(0),
-            e2e_us: AtomicU64::new(0),
-            e2e_samples: AtomicU64::new(0),
             bitrate: AtomicU64::new(0),
         }
     }
@@ -349,8 +345,6 @@ fn decode_loop(
                 counters.decode_us.fetch_add(us, Ordering::Relaxed);
                 counters.decode_samples.fetch_add(1, Ordering::Relaxed);
                 counters.frames_out.fetch_add(1, Ordering::Relaxed);
-                counters.e2e_us.fetch_add(us, Ordering::Relaxed);
-                counters.e2e_samples.fetch_add(1, Ordering::Relaxed);
                 source.publish(frame);
             }
             Ok(None) => {}
@@ -388,8 +382,6 @@ fn stats_loop(
             .unwrap_or((0.0, 0.0, 0.0));
         let ds = counters.decode_samples.load(Ordering::Relaxed).max(1);
         let decode_ms = counters.decode_us.load(Ordering::Relaxed) as f64 / ds as f64 / 1000.0;
-        let es = counters.e2e_samples.load(Ordering::Relaxed).max(1);
-        let e2e_ms = counters.e2e_us.load(Ordering::Relaxed) as f64 / es as f64 / 1000.0;
         let bitrate = counters.bitrate.load(Ordering::Relaxed);
         let dropped = stats_win
             .lock()
@@ -397,7 +389,7 @@ fn stats_loop(
             .map(|w| w.total_dropped())
             .unwrap_or(0);
         println!(
-            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={dropped} decode={decode_ms:.1}ms e2e={e2e_ms:.1}ms",
+            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={dropped} decode={decode_ms:.1}ms",
         );
     }
 }
