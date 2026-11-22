@@ -108,6 +108,17 @@ Useful flags: `--preset high-quality|balanced|low-latency|hotspot`,
 Touch and key input from the desktop need the krapy accessibility service
 turned on in the phone's settings. Viewing works without it.
 
+## Enable remote control (Android 13+)
+
+Android 13 and newer block accessibility for apps installed outside the Play
+Store, so the switch shows "Restricted setting" at first. Mirroring works
+without it; this is only for desktop touch and keys.
+
+1. Settings > Apps > krapy.
+2. Tap the ⋮ menu (top right) > Allow restricted settings, then confirm with
+   your PIN or fingerprint.
+3. Settings > Accessibility > krapy > turn on.
+
 ## Presets
 
 | preset | bitrate | fps | max size |
