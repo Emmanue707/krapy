@@ -116,3 +116,15 @@ decoder waits for the next keyframe and the desktop sends `Keyframe`
 No UDP from the phone for 3 s, or the TCP connection closing, ends the
 session. The phone reconnects with backoff 250 ms doubling to 4 s, trying
 the last host first and then mDNS.
+
+## Test vectors
+
+```
+k        = 000102...1f (32 bytes, 0x00..0x1f)
+S        = 652e39ae96eb24d8546fe67d80acb68c9710e974f062d7c4486e0be6657fb38b
+nonce_p  = 01 x16, nonce_d = 02 x16
+tcp_p2d  = c14af774e5c109ed4ef46e6b15c8718ac80b0d50eeb8f754def92a441e6fb3b4
+udp_d2p  = f8ce0d3e603791fe2648a067c98a537969b190eb20a9379c20dd3e4d5f06ac7b
+seal_tcp(tcp_p2d, counter 0, "krapy")
+         = 0000000000000000d483e26a1b70807bc388d46700f5be3dac1fe382e4
+```
