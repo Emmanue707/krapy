@@ -95,6 +95,11 @@ pub fn run(port: u16) -> Result<()> {
         }
     }
 
+    match krapy_render::probe_gpu() {
+        Some(desc) => println!("ok  gpu adapter {desc}"),
+        None => println!("warn  gpu adapter — install/update GPU drivers for windowed mirroring"),
+    }
+
     if failed {
         process::exit(1);
     }
