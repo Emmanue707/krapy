@@ -187,12 +187,11 @@ impl Listener {
         let frames = Arc::new(LatestFrame::new());
         let stats_window = Arc::new(Mutex::new(NetWindow::new()));
 
-        let stream = Arc::new(Mutex::new(stream));
+        let _ = stream.set_nodelay(true);
         let phone_addr = Arc::new(Mutex::new(None::<SocketAddr>));
         let last_udp = Arc::new(Mutex::new(Instant::now()));
 
         let tcp_h = {
-            let stream = Arc::clone(&stream);
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 tcp_loop(
@@ -289,7 +288,7 @@ fn read_sealed_start(stream: &mut TcpStream, keys: &SessionKeys) -> Result<Contr
 }
 
 fn tcp_loop(
-    stream: Arc<Mutex<TcpStream>>,
+    mut stream: TcpStream,
     read_key: [u8; 32],
     write_key: [u8; 32],
     user_in: Receiver<Control>,
@@ -297,34 +296,37 @@ fn tcp_loop(
     out: Sender<Control>,
     stop: Arc<AtomicBool>,
 ) {
-    let mut opener = Opener::new(&read_key);
-    let mut sealer = Sealer::new(&write_key);
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            break;
+    let writer = match stream.try_clone() {
+        Ok(w) => Arc::new(Mutex::new((w, Sealer::new(&write_key)))),
+        Err(_) => {
+            stop.store(true, Ordering::Relaxed);
+            return;
         }
-        while let Ok(c) = auto_in.try_recv() {
-            if send_control(&stream, &mut sealer, &c).is_err() {
-                return;
-            }
-        }
-        match user_in.try_recv() {
-            Ok(c) => {
-                if send_control(&stream, &mut sealer, &c).is_err() {
-                    break;
+    };
+    for (rx, user) in [(user_in, true), (auto_in, false)] {
+        let writer = Arc::clone(&writer);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            for c in rx {
+                if stop.load(Ordering::Relaxed) || send_control(&writer, &c).is_err() {
+                    stop.store(true, Ordering::Relaxed);
+                    return;
                 }
             }
-            Err(mpsc::TryRecvError::Disconnected) => break,
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-        let mut s = match stream.lock() {
-            Ok(g) => g,
-            Err(_) => break,
-        };
-        s.set_read_timeout(Some(Duration::from_millis(50))).ok();
-        let mut len_buf = [0u8; 2];
-        match s.read_exact(&mut len_buf) {
-            Ok(()) => {}
+            if user {
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+
+    let mut opener = Opener::new(&read_key);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut pending = Vec::with_capacity(4096);
+    let mut buf = [0u8; 4096];
+    while !stop.load(Ordering::Relaxed) {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => pending.extend_from_slice(&buf[..n]),
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
@@ -332,34 +334,29 @@ fn tcp_loop(
             }
             Err(_) => break,
         }
-        let len = u16::from_be_bytes(len_buf) as usize;
-        let mut wire = vec![0u8; len];
-        if s.read_exact(&mut wire).is_err() {
-            break;
-        }
-        drop(s);
-        let pt = match opener.open_tcp(&wire) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if let Ok(msg) = decode_control(&pt) {
-            let _ = out.send(msg);
+        while pending.len() >= 2 {
+            let len = u16::from_be_bytes([pending[0], pending[1]]) as usize;
+            if pending.len() < 2 + len {
+                break;
+            }
+            if let Ok(pt) = opener.open_tcp(&pending[2..2 + len])
+                && let Ok(msg) = decode_control(&pt)
+            {
+                let _ = out.send(msg);
+            }
+            pending.drain(..2 + len);
         }
     }
     stop.store(true, Ordering::Relaxed);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-fn send_control(
-    stream: &Arc<Mutex<TcpStream>>,
-    sealer: &mut Sealer,
-    ctrl: &Control,
-) -> Result<(), ()> {
+fn send_control(writer: &Mutex<(TcpStream, Sealer)>, ctrl: &Control) -> Result<(), ()> {
     let body = encode_control(ctrl).map_err(|_| ())?;
-    let sealed = sealer.seal_tcp(&body);
-    let frame = encode_tcp_frame(&sealed);
-    let mut s = stream.lock().map_err(|_| ())?;
-    s.write_all(&frame).map_err(|_| ())?;
-    Ok(())
+    let mut w = writer.lock().map_err(|_| ())?;
+    let (stream, sealer) = &mut *w;
+    let frame = encode_tcp_frame(&sealer.seal_tcp(&body));
+    stream.write_all(&frame).map_err(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
