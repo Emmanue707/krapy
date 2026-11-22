@@ -6,4 +6,16 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["dep:ffmpeg-next"]
+openh264 = ["dep:openh264"]
+
 [dependencies]
+anyhow = { workspace = true }
+libc = "0.2"
+ffmpeg-next = { version = "7.1", default-features = false, features = ["codec", "format", "software-scaling"], optional = true }
+openh264 = { version = "0.9.10", default-features = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
