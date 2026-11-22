@@ -2,6 +2,8 @@
 
 Low-latency Android screen mirroring for flaky Wi-Fi and phone hotspots.
 
+*Krapy* means mirror in Jiwaka, from Jiwaka Province in Papua New Guinea.
+
 A small Rust desktop app and a tiny Kotlin phone app. Scan a QR code to pair.
 No adb, no developer options. If the phone's IP changes it finds the desktop
 again over mDNS instead of freezing.
