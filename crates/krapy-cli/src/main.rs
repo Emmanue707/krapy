@@ -124,8 +124,8 @@ fn default_desktop_name() -> String {
 
 fn init_tracing(verbose: u8) {
     let default = match verbose {
-        0 => "info",
-        1 => "debug",
+        0 => "info,wgpu_hal=error,wgpu_core=error,naga=error,winit=warn",
+        1 => "debug,wgpu_hal=warn,wgpu_core=warn,naga=warn,winit=warn",
         _ => "trace",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
