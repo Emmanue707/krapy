@@ -6,15 +6,19 @@ import android.app.AlertDialog
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.provider.Settings
-import android.graphics.Color
+import android.content.res.ColorStateList
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -23,63 +27,73 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import kotlin.math.max
+
 class MainActivity : Activity() {
     private lateinit var peers: Peers
     private lateinit var listView: ListView
     private lateinit var uriField: EditText
-    private lateinit var inputHint: TextView
-    private lateinit var inputBtn: Button
+    private lateinit var statusLine: TextView
+    private lateinit var remoteBlock: LinearLayout
+    private lateinit var pairedLabel: TextView
+    private lateinit var emptyPeers: TextView
     private var peerRows: List<Peer> = emptyList()
     private var pendingPeer: Peer? = null
+    private val basePadH by lazy { dp(20) }
+    private val basePadTop by lazy { dp(16) }
+    private val basePadBottom by lazy { dp(20) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         peers = Peers(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 48, 32, 32)
+            setPadding(basePadH, basePadTop, basePadH, basePadBottom)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
-        val title = TextView(this).apply {
+        applyWindowInsets(root)
+        root.addView(TextView(this).apply {
             text = "krapy"
             textSize = 28f
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.BLACK)
-        }
-        root.addView(title)
-        root.addView(TextView(this).apply {
-            text = "mirror, in Jiwaka"
-            textSize = 12f
-            setTextColor(Color.GRAY)
+            setTextColor(textPrimary())
         })
-        val phoneLine = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "${peers.phoneName()} · ${peers.phoneId()}"
             textSize = 13f
-            setTextColor(Color.DKGRAY)
-            setPadding(0, 8, 0, 24)
+            setTextColor(textSecondary())
+            setPadding(0, dp(4), 0, dp(12))
+        })
+        statusLine = TextView(this).apply {
+            textSize = 14f
+            setTextColor(textSecondary())
+            setPadding(0, 0, 0, dp(16))
         }
-        root.addView(phoneLine)
-        inputHint = TextView(this).apply {
+        root.addView(statusLine)
+        remoteBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        root.addView(remoteBlock)
+        pairedLabel = TextView(this).apply {
+            text = "paired desktops"
+            textSize = 12f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(textSecondary())
+            setPadding(0, dp(8), 0, dp(4))
+        }
+        root.addView(pairedLabel)
+        emptyPeers = TextView(this).apply {
+            text = "no desktops paired yet"
             textSize = 13f
-            setTextColor(Color.DKGRAY)
-            setPadding(0, 0, 0, 12)
+            setTextColor(textSecondary())
+            setPadding(0, dp(4), 0, dp(8))
             visibility = View.GONE
         }
-        root.addView(inputHint)
-        inputBtn = Button(this).apply {
-            text = "enable remote control"
-            visibility = View.GONE
-            setOnClickListener {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = 12 }
-        }
-        root.addView(inputBtn)
+        root.addView(emptyPeers)
         listView = ListView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -88,27 +102,31 @@ class MainActivity : Activity() {
             )
         }
         root.addView(listView)
-        val scan = Button(this).apply {
-            text = "Scan QR"
-            setOnClickListener { startScan() }
-        }
-        root.addView(scan)
-        uriField = EditText(this).apply {
-            hint = "krapy://pair?..."
-            setSingleLine()
+        root.addView(primaryButton("Scan QR") { startScan() }.apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = 16 }
+            ).apply { topMargin = dp(12) }
+        })
+        uriField = EditText(this).apply {
+            hint = "krapy://pair?..."
+            setSingleLine()
+            minHeight = dp(48)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) }
         }
         root.addView(uriField)
-        val pair = Button(this).apply {
-            text = "Pair"
-            setOnClickListener { pairFromField() }
-        }
-        root.addView(pair)
+        root.addView(primaryButton("Pair") { pairFromField() }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) }
+        })
         setContentView(root)
-        refreshInputHint(inputHint, inputBtn)
+        refreshRemoteBlock()
+        refreshStatus()
         listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
             startMirroring(peerRows[pos])
         }
@@ -129,8 +147,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::inputHint.isInitialized && ::inputBtn.isInitialized) {
-            refreshInputHint(inputHint, inputBtn)
+        if (::remoteBlock.isInitialized) {
+            refreshRemoteBlock()
+        }
+        if (::statusLine.isInitialized) {
+            refreshStatus()
+        }
+        if (::listView.isInitialized) {
+            refreshList()
         }
     }
 
@@ -164,6 +188,7 @@ class MainActivity : Activity() {
                 return
             }
             MirrorService.start(this, peer.id, resultCode, data)
+            refreshStatus()
         }
     }
 
@@ -204,6 +229,7 @@ class MainActivity : Activity() {
             peers.upsert(peer)
             uriField.setText("")
             refreshList()
+            refreshStatus()
             Toast.makeText(this, "paired ${data.desktopName}", Toast.LENGTH_SHORT).show()
             startMirroring(peer)
         } catch (e: PairingException) {
@@ -213,14 +239,88 @@ class MainActivity : Activity() {
 
     private fun refreshList() {
         peerRows = peers.list()
+        emptyPeers.visibility = if (peerRows.isEmpty()) View.VISIBLE else View.GONE
         val labels = peerRows.map { "${it.name}\n${it.host}:${it.port}" }
         listView.adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_2, labels) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val v = super.getView(position, convertView, parent) as TextView
-                v.setTextColor(Color.BLACK)
+                v.setTextColor(textPrimary())
                 v.gravity = Gravity.CENTER_VERTICAL
                 return v
             }
+        }
+        refreshStatus()
+    }
+
+    private fun refreshStatus() {
+        val mirroring = MirrorService.activePeerName
+        statusLine.text = when {
+            mirroring != null -> "mirroring to $mirroring"
+            peerRows.isNotEmpty() -> "paired (${peerRows.size} desktop${if (peerRows.size == 1) "" else "s"})"
+            else -> "idle"
+        }
+    }
+
+    private fun refreshRemoteBlock() {
+        remoteBlock.removeAllViews()
+        if (InputService.InputBridge.enabled()) {
+            remoteBlock.visibility = View.GONE
+            return
+        }
+        remoteBlock.visibility = View.VISIBLE
+        if (Build.VERSION.SDK_INT >= 33) {
+            remoteBlock.addView(TextView(this).apply {
+                text =
+                    "Android blocks this for sideloaded apps. Open App info, tap the ⋮ menu, " +
+                    "choose Allow restricted settings, then turn on krapy in Accessibility."
+                textSize = 13f
+                setTextColor(textSecondary())
+                setPadding(0, 0, 0, dp(8))
+            })
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            row.addView(secondaryButton("App info") {
+                startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", packageName, null)
+                    },
+                )
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = dp(6)
+                }
+            })
+            row.addView(secondaryButton("Accessibility") {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(6)
+                }
+            })
+            remoteBlock.addView(row)
+            remoteBlock.addView(View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(16),
+                )
+            })
+        } else {
+            remoteBlock.addView(TextView(this).apply {
+                text = "remote control needs accessibility"
+                textSize = 13f
+                setTextColor(textSecondary())
+                setPadding(0, 0, 0, dp(8))
+            })
+            remoteBlock.addView(secondaryButton("enable remote control") {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            })
+            remoteBlock.addView(View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(16),
+                )
+            })
         }
     }
 
@@ -241,17 +341,6 @@ class MainActivity : Activity() {
         startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
     }
 
-    private fun refreshInputHint(hint: TextView, btn: Button) {
-        if (InputService.InputBridge.enabled()) {
-            hint.visibility = View.GONE
-            btn.visibility = View.GONE
-            return
-        }
-        hint.visibility = View.VISIBLE
-        btn.visibility = View.VISIBLE
-        hint.text = "remote control needs accessibility"
-    }
-
     private fun confirmForget(peer: Peer) {
         AlertDialog.Builder(this)
             .setMessage("Forget ${peer.name}?")
@@ -262,6 +351,85 @@ class MainActivity : Activity() {
             .setNegativeButton("Cancel", null)
             .show()
     }
+
+    private fun applyWindowInsets(root: LinearLayout) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener { v, insets ->
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                val ime = insets.getInsets(WindowInsets.Type.ime())
+                val cutout = insets.getInsets(WindowInsets.Type.displayCutout())
+                val bottom = max(bars.bottom, ime.bottom)
+                v.setPadding(
+                    basePadH + max(bars.left, cutout.left),
+                    basePadTop + max(bars.top, cutout.top),
+                    basePadH + max(bars.right, cutout.right),
+                    basePadBottom + bottom,
+                )
+                insets
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            root.setOnApplyWindowInsetsListener { v, insets ->
+                val sys = insets.systemWindowInsets
+                v.setPadding(
+                    basePadH + sys.left,
+                    basePadTop + sys.top,
+                    basePadH + sys.right,
+                    basePadBottom + sys.bottom,
+                )
+                insets
+            }
+        }
+        root.requestApplyInsets()
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun textPrimary(): Int {
+        val tv = TypedValue()
+        theme.resolveAttribute(android.R.attr.textColorPrimary, tv, true)
+        return tv.data
+    }
+
+    private fun textSecondary(): Int {
+        val tv = TypedValue()
+        theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
+        return tv.data
+    }
+
+    private fun accentColor(): Int = getColor(R.color.accent)
+
+    private fun primaryButton(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            minHeight = dp(48)
+            setTextColor(ColorStateList.valueOf(0xFFFFFFFF.toInt()))
+            background = GradientDrawable().apply {
+                setColor(accentColor())
+                cornerRadius = dp(8).toFloat()
+            }
+            stateListAnimator = null
+            elevation = 0f
+            setOnClickListener { onClick() }
+        }
+
+    private fun secondaryButton(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            minHeight = dp(48)
+            setTextColor(accentColor())
+            background = GradientDrawable().apply {
+                setStroke(dp(1), accentColor())
+                cornerRadius = dp(8).toFloat()
+                setColor(0)
+            }
+            stateListAnimator = null
+            elevation = 0f
+            setOnClickListener { onClick() }
+        }
 
     companion object {
         private const val REQ_SCAN = 1
