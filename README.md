@@ -62,6 +62,21 @@ statically. Windows and macOS builds use openh264 for now.
 
 `adb` is only needed for the adb fallback.
 
+### Linux install
+
+No sudo needed:
+
+```
+tar xzf krapy-<version>-linux-x86_64.tar.gz
+cd krapy-<version>-linux-x86_64
+mkdir -p ~/.local/bin && cp krapy ~/.local/bin/
+krapy pair
+```
+
+If `krapy` is not found, open a new terminal or add `~/.local/bin` to your
+`PATH`. Leave `krapy pair` running while the phone scans; it is the side the
+phone connects to.
+
 ## Build from source
 
 - Rust (stable)
@@ -83,7 +98,8 @@ cargo build --release
 ./target/release/krapy pair
 ```
 
-Open the app, tap Scan QR, point it at the terminal. Mirroring starts.
+Keep `krapy pair` running. Open the app, tap Scan QR, point it at the
+terminal. Mirroring starts.
 
 Next time:
 
