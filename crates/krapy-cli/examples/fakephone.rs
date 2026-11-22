@@ -339,11 +339,11 @@ fn main() -> Result<()> {
     });
 
     let ping_in = keys.udp_d2p;
-    let pong_out = keys.udp_p2d;
+    let useal = Arc::new(Mutex::new(Sealer::new(&keys.udp_p2d)));
+    let pseal = Arc::clone(&useal);
     let udp_read = udp.try_clone().context("udp clone")?;
     thread::spawn(move || {
         let mut opener = Opener::new(&ping_in);
-        let mut pseal = Sealer::new(&pong_out);
         let mut buf = [0u8; 2048];
         udp_read
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -370,17 +370,26 @@ fn main() -> Result<()> {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
+                let Ok(mut seal) = pseal.lock() else {
+                    break;
+                };
                 let mut header = [0u8; 9];
                 header[0] = body[0];
-                header[1..9].copy_from_slice(&pseal.counter().to_be_bytes());
-                let wire = pseal.seal_udp(&header, &body[1..]);
+                header[1..9].copy_from_slice(&seal.counter().to_be_bytes());
+                let wire = seal.seal_udp(&header, &body[1..]);
+                drop(seal);
                 let _ = udp_read.send(&wire);
             }
         }
     });
 
-    let mut useal = Sealer::new(&keys.udp_p2d);
-    send_udp(&udp, dest_addr, &mut useal, &Datagram::Keepalive, 0.0)?;
+    send_udp(
+        &udp,
+        dest_addr,
+        &mut useal.lock().expect("sealer"),
+        &Datagram::Keepalive,
+        0.0,
+    )?;
 
     let frame_interval = Duration::from_secs_f64(1.0 / args.fps as f64);
     let end = Instant::now() + Duration::from_secs(args.seconds);
@@ -408,7 +417,13 @@ fn main() -> Result<()> {
         let au = &aus[au_idx];
         let capture_us = capture_base.elapsed().as_micros() as u64;
         for dg in fragments(&au.data, frame_id, au.flags, capture_us) {
-            send_udp(&udp, dest_addr, &mut useal, &dg, args.loss)?;
+            send_udp(
+                &udp,
+                dest_addr,
+                &mut useal.lock().expect("sealer"),
+                &dg,
+                args.loss,
+            )?;
         }
         frames_sent.fetch_add(1, Ordering::Relaxed);
         frame_id = frame_id.wrapping_add(1);
@@ -419,7 +434,13 @@ fn main() -> Result<()> {
 
         thread::sleep(frame_interval);
         if Instant::now().duration_since(capture_base) >= Duration::from_secs(1) {
-            send_udp(&udp, dest_addr, &mut useal, &Datagram::Keepalive, 0.0)?;
+            send_udp(
+                &udp,
+                dest_addr,
+                &mut useal.lock().expect("sealer"),
+                &Datagram::Keepalive,
+                0.0,
+            )?;
         }
     }
 
