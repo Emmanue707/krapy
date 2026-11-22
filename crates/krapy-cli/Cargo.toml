@@ -1,0 +1,23 @@
+[package]
+name = "krapy-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "krapy"
+path = "src/main.rs"
+
+[dependencies]
+krapy-core = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+qrcode = { workspace = true }
+base64 = { workspace = true }
+urlencoding = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
