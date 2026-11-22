@@ -63,6 +63,15 @@ class Peers(context: Context) {
         saveAll(all)
     }
 
+    fun updateEndpoint(id: String, host: String, port: Int) {
+        val all = list().toMutableList()
+        val idx = all.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val old = all[idx]
+        all[idx] = old.copy(host = host, port = port, lastSeen = System.currentTimeMillis())
+        saveAll(all)
+    }
+
     fun fromPairing(data: PairingData, lastSeen: Long = 0L): Peer =
         Peer(
             id = data.desktopId,
