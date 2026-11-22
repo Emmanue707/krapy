@@ -3,8 +3,10 @@ package com.waghitech.krapy
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.Settings
 import android.graphics.Color
 import android.graphics.Typeface
 import android.media.projection.MediaProjectionManager
@@ -25,6 +27,8 @@ class MainActivity : Activity() {
     private lateinit var peers: Peers
     private lateinit var listView: ListView
     private lateinit var uriField: EditText
+    private lateinit var inputHint: TextView
+    private lateinit var inputBtn: Button
     private var peerRows: List<Peer> = emptyList()
     private var pendingPeer: Peer? = null
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,6 +56,25 @@ class MainActivity : Activity() {
             setPadding(0, 8, 0, 24)
         }
         root.addView(phoneLine)
+        inputHint = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 12)
+            visibility = View.GONE
+        }
+        root.addView(inputHint)
+        inputBtn = Button(this).apply {
+            text = "enable remote control"
+            visibility = View.GONE
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = 12 }
+        }
+        root.addView(inputBtn)
         listView = ListView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -80,6 +103,7 @@ class MainActivity : Activity() {
         }
         root.addView(pair)
         setContentView(root)
+        refreshInputHint(inputHint, inputBtn)
         listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
             startMirroring(peerRows[pos])
         }
@@ -96,6 +120,28 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handlePairIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::inputHint.isInitialized && ::inputBtn.isInitialized) {
+            refreshInputHint(inputHint, inputBtn)
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) return
+        if (Build.VERSION.SDK_INT < 29) return
+        val send = SessionBridge.sendClipboard ?: return
+        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = cm.primaryClip ?: return
+        if (clip.itemCount < 1) return
+        val text = clip.getItemAt(0).coerceToText(this)?.toString() ?: return
+        if (text == MirrorService.lastDesktopClipboard) return
+        if (text == MirrorService.lastPhoneClipboardSent) return
+        MirrorService.lastPhoneClipboardSent = text
+        send(text)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -188,6 +234,17 @@ class MainActivity : Activity() {
         pendingPeer = peer
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
+    }
+
+    private fun refreshInputHint(hint: TextView, btn: Button) {
+        if (InputService.InputBridge.enabled()) {
+            hint.visibility = View.GONE
+            btn.visibility = View.GONE
+            return
+        }
+        hint.visibility = View.VISIBLE
+        btn.visibility = View.VISIBLE
+        hint.text = "remote control needs accessibility"
     }
 
     private fun confirmForget(peer: Peer) {
