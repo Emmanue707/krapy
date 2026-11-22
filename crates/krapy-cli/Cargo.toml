@@ -17,6 +17,7 @@ path = "examples/fakephone.rs"
 [features]
 default = ["ffmpeg"]
 ffmpeg = ["krapy-decode/ffmpeg"]
+ffmpeg-static = ["ffmpeg", "krapy-decode/ffmpeg-static"]
 openh264 = ["krapy-decode/openh264"]
 
 [dependencies]

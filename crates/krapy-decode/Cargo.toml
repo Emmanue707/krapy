@@ -9,6 +9,7 @@ repository.workspace = true
 [features]
 default = ["ffmpeg"]
 ffmpeg = ["dep:ffmpeg-next"]
+ffmpeg-static = ["ffmpeg", "ffmpeg-next/static"]
 openh264 = ["dep:openh264"]
 
 [dependencies]
