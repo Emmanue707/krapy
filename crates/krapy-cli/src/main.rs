@@ -1,9 +1,12 @@
 mod cmd;
+mod mirror;
 mod net;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use krapy_core::Preset;
+
+use mirror::MirrorOpts;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -25,6 +28,21 @@ impl From<PresetArg> for Preset {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DecoderArg {
+    Ffmpeg,
+    Openh264,
+}
+
+impl DecoderArg {
+    fn name(self) -> &'static str {
+        match self {
+            DecoderArg::Ffmpeg => "ffmpeg",
+            DecoderArg::Openh264 => "openh264",
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "krapy", version, about = "krapy desktop")]
 struct Cli {
@@ -38,12 +56,10 @@ struct Cli {
 enum Command {
     List,
     Pair {
-        #[arg(long, default_value_t = 27183)]
-        port: u16,
+        #[command(flatten)]
+        stream: StreamArgs,
         #[arg(long, default_value_t = default_desktop_name())]
         name: String,
-        #[arg(long, value_enum, default_value_t = PresetArg::Balanced)]
-        preset: PresetArg,
         #[arg(
             long,
             num_args = 0..=1,
@@ -53,11 +69,9 @@ enum Command {
         adb: Option<String>,
     },
     Connect {
-        device: String,
-        #[arg(long, value_enum, default_value_t = PresetArg::Balanced)]
-        preset: PresetArg,
-        #[arg(long, default_value_t = 27183)]
-        port: u16,
+        device: Option<String>,
+        #[command(flatten)]
+        stream: StreamArgs,
     },
     Doctor {
         #[arg(long, default_value_t = 27183)]
@@ -74,6 +88,26 @@ enum Command {
     Forget {
         device: String,
     },
+}
+
+#[derive(clap::Args)]
+struct StreamArgs {
+    #[arg(long, default_value_t = 27183)]
+    port: u16,
+    #[arg(long, value_enum, default_value_t = PresetArg::Balanced)]
+    preset: PresetArg,
+    #[arg(long, value_enum)]
+    decoder: Option<DecoderArg>,
+    #[arg(long)]
+    max_size: Option<u16>,
+    #[arg(long)]
+    bitrate: Option<u32>,
+    #[arg(long)]
+    fps: Option<u8>,
+    #[arg(long)]
+    stats: bool,
+    #[arg(long)]
+    no_window: bool,
 }
 
 #[derive(Subcommand)]
@@ -103,22 +137,31 @@ fn init_tracing(verbose: u8) {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+fn stream_opts(args: &StreamArgs) -> MirrorOpts {
+    MirrorOpts {
+        preset: args.preset.into(),
+        decoder: args.decoder.map(DecoderArg::name).map(str::to_string),
+        max_size: args.max_size,
+        bitrate: args.bitrate,
+        fps: args.fps,
+        stats: args.stats,
+        no_window: args.no_window,
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     match cli.cmd {
         Command::List => cmd::list::run(),
         Command::Pair {
-            port,
+            stream,
             name,
-            preset,
             adb,
-        } => cmd::pair::run(port, &name, preset.into(), adb),
-        Command::Connect {
-            device,
-            preset,
-            port,
-        } => cmd::connect::run(&device, preset.into(), port),
+        } => cmd::pair::run(stream.port, &name, stream_opts(&stream), adb),
+        Command::Connect { device, stream } => {
+            cmd::connect::run(device, stream.port, stream_opts(&stream))
+        }
         Command::Doctor { port } => cmd::doctor::run(port),
         Command::Adb { cmd } => match cmd {
             AdbCommand::Pair { host_port, code } => cmd::adb::pair(&host_port, &code),
