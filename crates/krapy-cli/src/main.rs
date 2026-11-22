@@ -11,9 +11,13 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum PresetArg {
+    /// highest quality, more bandwidth
     HighQuality,
+    /// default balance of quality and latency
     Balanced,
+    /// favor low latency over quality
     LowLatency,
+    /// tuned for phone hotspot links
     Hotspot,
 }
 
@@ -30,7 +34,9 @@ impl From<PresetArg> for Preset {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DecoderArg {
+    /// ffmpeg software decoder
     Ffmpeg,
+    /// openh264 software decoder
     Openh264,
 }
 
@@ -44,8 +50,13 @@ impl DecoderArg {
 }
 
 #[derive(Parser)]
-#[command(name = "krapy", version, about = "krapy desktop")]
+#[command(
+    name = "krapy",
+    version,
+    about = "Low-latency Android screen mirroring. Pair with a QR scan, then mirror over Wi-Fi."
+)]
 struct Cli {
+    /// More logs (-v debug, -vv trace)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
     #[command(subcommand)]
@@ -54,66 +65,96 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show paired phones and adb devices
     List,
+    /// Show a QR code for the phone app to scan; keep it running until the phone connects
     Pair {
         #[command(flatten)]
         stream: StreamArgs,
+        /// name shown to the phone during pairing
         #[arg(long, default_value_t = default_desktop_name())]
         name: String,
-        #[arg(
-            long,
-            num_args = 0..=1,
-            default_missing_value = "",
-            help = "launch pair uri on phone via adb instead of QR"
-        )]
+        /// open pair uri on phone via adb instead of QR (optional device serial)
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SERIAL")]
         adb: Option<String>,
     },
+    /// Mirror a paired phone (finds it again over mDNS)
     Connect {
+        /// device id or alias (default when only one paired phone)
         device: Option<String>,
         #[command(flatten)]
         stream: StreamArgs,
     },
+    /// Check network, port and adb setup
     Doctor {
+        /// port to check for bindability
         #[arg(long, default_value_t = 27183)]
         port: u16,
     },
+    /// adb fallback: pair or connect over wireless debugging
     Adb {
         #[command(subcommand)]
         cmd: AdbCommand,
     },
+    /// Give a paired phone a short name
     Alias {
+        /// device id or alias
         device: String,
+        /// short name to remember this phone
         name: String,
     },
+    /// Remove a paired phone
     Forget {
+        /// device id or alias
         device: String,
     },
 }
 
 #[derive(clap::Args)]
 struct StreamArgs {
+    /// listener port for the phone to connect
     #[arg(long, default_value_t = 27183)]
     port: u16,
+    /// stream quality preset
     #[arg(long, value_enum, default_value_t = PresetArg::Balanced)]
     preset: PresetArg,
+    /// video decoder backend
     #[arg(long, value_enum)]
     decoder: Option<DecoderArg>,
+    /// max video dimension in pixels
     #[arg(long)]
     max_size: Option<u16>,
-    #[arg(long)]
+    /// target video bitrate
+    #[arg(long, value_name = "MBPS")]
     bitrate: Option<u32>,
+    /// max capture fps
     #[arg(long)]
     fps: Option<u8>,
+    /// print stream stats
     #[arg(long)]
     stats: bool,
+    /// run without a mirror window
     #[arg(long)]
     no_window: bool,
 }
 
 #[derive(Subcommand)]
 enum AdbCommand {
-    Pair { host_port: String, code: String },
-    Connect { host_port: String },
+    /// pair over wireless debugging
+    Pair {
+        /// phone wireless debugging address
+        #[arg(value_name = "HOST:PORT")]
+        host_port: String,
+        /// pairing code from the phone
+        #[arg(value_name = "CODE")]
+        code: String,
+    },
+    /// connect to a paired wireless adb endpoint
+    Connect {
+        /// phone wireless debugging address
+        #[arg(value_name = "HOST:PORT")]
+        host_port: String,
+    },
 }
 
 fn default_desktop_name() -> String {
