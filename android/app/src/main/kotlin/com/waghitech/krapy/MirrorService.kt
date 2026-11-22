@@ -27,6 +27,7 @@ import android.util.DisplayMetrics
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
+import android.widget.Toast
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.min
@@ -107,6 +108,13 @@ class MirrorService : Service(), LinkCallbacks {
             lk.sendTcpSealed(Wire.encodeControl(Wire.Control.Clipboard(text)))
         }
         if (!lk.connect(start)) {
+            mainHandler.post {
+                Toast.makeText(
+                    this,
+                    "can't reach ${p.host}:${p.port}. Same Wi-Fi? On the PC run krapy doctor (firewall)",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
             beginReconnect(immediate = false)
         } else {
             reconnecting.set(false)
