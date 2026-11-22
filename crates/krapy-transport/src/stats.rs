@@ -15,6 +15,7 @@ pub struct NetWindow {
     frames_dropped: u32,
     late_frames: u32,
     total_dropped: u64,
+    last: Option<NetStats>,
 }
 
 impl NetWindow {
@@ -58,6 +59,10 @@ impl NetWindow {
         self.late_frames += 1;
     }
 
+    pub fn last(&self) -> Option<NetStats> {
+        self.last
+    }
+
     pub fn rtt_ms(&self) -> f32 {
         self.rtt_ewma.unwrap_or(0.0)
     }
@@ -86,6 +91,7 @@ impl NetWindow {
             late_frames: self.late_frames,
         };
         self.window_start = Some(now);
+        self.last = Some(stats);
         self.frames_completed = 0;
         self.frames_dropped = 0;
         self.late_frames = 0;

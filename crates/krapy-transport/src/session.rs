@@ -387,9 +387,6 @@ fn udp_loop(
             break;
         }
         let now = Instant::now();
-        if let Ok(mut nw) = stats.lock() {
-            let _ = nw.tick(now);
-        }
         if last_ping.elapsed() >= PING_INTERVAL {
             if let Some(addr) = phone_addr.lock().ok().and_then(|g| *g) {
                 ping_id = ping_id.wrapping_add(1);

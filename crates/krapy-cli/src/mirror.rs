@@ -383,10 +383,8 @@ fn stats_loop(
         let (rtt, jitter, loss) = stats_win
             .lock()
             .ok()
-            .and_then(|mut w| {
-                let net = w.tick(Instant::now())?;
-                Some((net.rtt_ms, net.jitter_ms, net.loss))
-            })
+            .and_then(|w| w.last())
+            .map(|net| (net.rtt_ms, net.jitter_ms, net.loss))
             .unwrap_or((0.0, 0.0, 0.0));
         let ds = counters.decode_samples.load(Ordering::Relaxed).max(1);
         let decode_ms = counters.decode_us.load(Ordering::Relaxed) as f64 / ds as f64 / 1000.0;
