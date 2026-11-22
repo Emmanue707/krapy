@@ -49,6 +49,11 @@ class MainActivity : Activity() {
             setTextColor(Color.BLACK)
         }
         root.addView(title)
+        root.addView(TextView(this).apply {
+            text = "mirror, in Jiwaka"
+            textSize = 12f
+            setTextColor(Color.GRAY)
+        })
         val phoneLine = TextView(this).apply {
             text = "${peers.phoneName()} · ${peers.phoneId()}"
             textSize = 13f
