@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="input_service_description">krapy remote control (reads the focused field only when sending text from desktop)</string>
+</resources>
