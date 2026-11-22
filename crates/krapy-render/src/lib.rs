@@ -7,6 +7,7 @@ mod mailbox;
 use krapy_transport::Control;
 use std::sync::mpsc::Sender;
 
+pub use gpu::probe_gpu;
 pub use mailbox::FrameSource;
 
 pub fn run(source: FrameSource, device_name: &str, control: Sender<Control>) -> anyhow::Result<()> {

@@ -323,3 +323,18 @@ fn pick_present(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
         wgpu::PresentMode::AutoVsync
     }
 }
+
+pub fn probe_gpu() -> Option<String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok()?;
+    let info = adapter.get_info();
+    Some(format!("{:?}/{}", info.backend, info.name))
+}

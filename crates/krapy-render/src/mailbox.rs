@@ -14,6 +14,7 @@ struct Inner {
     proxy: Mutex<Option<EventLoopProxy<Wake>>>,
 }
 
+#[derive(Clone)]
 pub struct FrameSource {
     inner: Arc<Inner>,
 }
