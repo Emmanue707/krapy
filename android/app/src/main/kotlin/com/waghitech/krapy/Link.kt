@@ -10,20 +10,24 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 interface LinkCallbacks {
     fun onControl(c: Wire.Control)
-    fun onLost(reason: String)
+    fun onLinkDown(reason: String)
 }
 
 class Link(
-    private val peer: Peer,
+    private var peer: Peer,
     private val phoneIdHex: String,
     private val phoneName: String,
     private val callbacks: LinkCallbacks,
 ) {
-    private val stop = AtomicBoolean(false)
+    private val halt = AtomicBoolean(false)
+    private val transportStop = AtomicBoolean(false)
+    private val connected = AtomicBoolean(false)
+    private val lastPingMs = AtomicLong(0)
     private var tcpIn: BufferedInputStream? = null
     private var tcpOut: BufferedOutputStream? = null
     private var udp: DatagramSocket? = null
@@ -39,11 +43,28 @@ class Link(
     private var tcpThread: Thread? = null
     private var udpThread: Thread? = null
     private var keepaliveThread: Thread? = null
+    private var pingWatchThread: Thread? = null
 
-    fun connect(start: Wire.Control.Start): Boolean {
+    fun isConnected(): Boolean = connected.get()
+
+    fun peer(): Peer = peer
+
+    fun updatePeer(p: Peer) {
+        peer = p
+    }
+
+    fun connect(
+        start: Wire.Control.Start,
+        host: String? = null,
+        port: Int? = null,
+    ): Boolean {
+        val h = host ?: peer.host
+        val p = port ?: peer.port
+        closeTransport()
+        transportStop.set(false)
         try {
             val socket = Socket()
-            socket.connect(InetSocketAddress(peer.host, peer.port), 2000)
+            socket.connect(InetSocketAddress(h, p), 2000)
             socket.tcpNoDelay = true
             val inp = BufferedInputStream(socket.getInputStream())
             val out = BufferedOutputStream(socket.getOutputStream())
@@ -54,13 +75,11 @@ class Link(
             out.flush()
             if (inp.read(tcpLenBuf) != 2) {
                 socket.close()
-                callbacks.onLost("welcome length")
                 return false
             }
             val wlen = Wire.readTcpFrameLength(tcpLenBuf)
             if (wlen < 0 || wlen > 65535) {
                 socket.close()
-                callbacks.onLost("welcome size")
                 return false
             }
             val welcomeBody = ByteArray(wlen)
@@ -69,7 +88,6 @@ class Link(
                 val n = inp.read(welcomeBody, got, wlen - got)
                 if (n < 0) {
                     socket.close()
-                    callbacks.onLost("welcome body")
                     return false
                 }
                 got += n
@@ -77,7 +95,6 @@ class Link(
             val (desktopId, nonceD) = Wire.decodeWelcome(welcomeBody)
             if (Wire.hexId(desktopId) != peer.id) {
                 socket.close()
-                callbacks.onLost("desktop id mismatch")
                 return false
             }
             val keys = SessionKeys.derive(peer.secret, nonceP, nonceD)
@@ -98,15 +115,18 @@ class Link(
             )
             sendTcpSealed(startBytes)
             val dg = DatagramSocket()
-            dg.connect(InetSocketAddress(peer.host, peer.port))
+            dg.connect(InetSocketAddress(h, p))
             udp = dg
             sendUdpRaw(Wire.DG_KEEPALIVE)
+            connected.set(true)
+            lastPingMs.set(System.currentTimeMillis())
             startReaderThreads()
             startKeepalive()
+            startPingWatch()
+            peer = peer.copy(host = h, port = p)
             return true
-        } catch (e: Exception) {
-            callbacks.onLost(e.message ?: "connect failed")
-            closeQuiet()
+        } catch (_: Exception) {
+            closeTransport()
             return false
         }
     }
@@ -125,6 +145,7 @@ class Link(
         off: Int,
         len: Int,
     ) {
+        if (!connected.get()) return
         val seal = udpSeal ?: return
         val dg = udp ?: return
         val bodyLen = 18 + len
@@ -151,6 +172,7 @@ class Link(
     }
 
     fun sendTcpSealed(plaintext: ByteArray) {
+        if (!connected.get()) return
         val seal = tcpSeal ?: return
         val out = tcpOut ?: return
         try {
@@ -162,16 +184,19 @@ class Link(
                 }
             }
         } catch (_: Exception) {
-            if (!stop.get()) callbacks.onLost("tcp write")
+            if (!halt.get()) onTransportLost("tcp write")
         }
     }
 
     fun close() {
-        stop.set(true)
-        closeQuiet()
+        halt.set(true)
+        connected.set(false)
+        closeTransport()
     }
 
-    private fun closeQuiet() {
+    fun closeTransport() {
+        transportStop.set(true)
+        connected.set(false)
         try {
             tcpIn?.close()
         } catch (_: Exception) {
@@ -187,6 +212,21 @@ class Link(
         tcpIn = null
         tcpOut = null
         udp = null
+        tcpSeal = null
+        tcpOpen = null
+        udpSeal = null
+        udpOpen = null
+        tcpThread = null
+        udpThread = null
+        keepaliveThread = null
+        pingWatchThread = null
+    }
+
+    private fun onTransportLost(reason: String) {
+        if (halt.get()) return
+        if (!connected.getAndSet(false)) return
+        closeTransport()
+        callbacks.onLinkDown(reason)
     }
 
     private fun startReaderThreads() {
@@ -196,14 +236,34 @@ class Link(
 
     private fun startKeepalive() {
         keepaliveThread = thread(name = "krapy-ka", isDaemon = true) {
-            while (!stop.get()) {
+            while (!transportStop.get() && !halt.get()) {
                 try {
                     Thread.sleep(1000)
                 } catch (_: InterruptedException) {
                     break
                 }
-                if (stop.get()) break
+                if (transportStop.get() || halt.get()) break
+                if (!connected.get()) continue
                 sendUdpRaw(Wire.DG_KEEPALIVE)
+            }
+        }
+    }
+
+    private fun startPingWatch() {
+        pingWatchThread = thread(name = "krapy-ping", isDaemon = true) {
+            while (!transportStop.get() && !halt.get()) {
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (transportStop.get() || halt.get()) break
+                if (!connected.get()) continue
+                val last = lastPingMs.get()
+                if (last > 0 && System.currentTimeMillis() - last > 3000) {
+                    onTransportLost("ping timeout")
+                    break
+                }
             }
         }
     }
@@ -212,7 +272,7 @@ class Link(
         val inp = tcpIn ?: return
         val open = tcpOpen ?: return
         val lenBuf = ByteArray(2)
-        while (!stop.get()) {
+        while (!transportStop.get() && !halt.get()) {
             try {
                 if (inp.read(lenBuf) != 2) break
                 val flen = Wire.readTcpFrameLength(lenBuf)
@@ -240,17 +300,16 @@ class Link(
                 break
             }
         }
-        if (!stop.getAndSet(true)) {
-            callbacks.onLost("tcp closed")
+        if (!transportStop.get() && !halt.get()) {
+            onTransportLost("tcp closed")
         }
-        closeQuiet()
     }
 
     private fun udpLoop() {
         val dg = udp ?: return
         val open = udpOpen ?: return
         val packet = DatagramPacket(ByteArray(1400), 1400)
-        while (!stop.get()) {
+        while (!transportStop.get() && !halt.get()) {
             try {
                 dg.receive(packet)
                 val wire = packet.data.copyOfRange(0, packet.length)
@@ -260,12 +319,13 @@ class Link(
                     continue
                 }
                 if (wire[0] == Wire.DG_PING.toByte() && plain.size >= 12) {
+                    lastPingMs.set(System.currentTimeMillis())
                     val id = u32(plain, 0)
                     val t = u64(plain, 4)
                     sendUdpPong(id, t)
                 }
             } catch (_: Exception) {
-                if (stop.get()) break
+                if (transportStop.get() || halt.get()) break
             }
         }
     }
@@ -275,6 +335,7 @@ class Link(
     }
 
     private fun sendUdpRaw(type: Int, pingId: Int = 0, pingT: Long = 0) {
+        if (!connected.get()) return
         val seal = udpSeal ?: return
         val dg = udp ?: return
         val body = Wire.encodeDatagramBody(type, pingId = pingId, pingT = pingT)

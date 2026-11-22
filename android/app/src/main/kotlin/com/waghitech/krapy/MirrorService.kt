@@ -5,6 +5,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -13,6 +15,10 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -22,20 +28,28 @@ import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
+import kotlin.math.min
 
 class MirrorService : Service(), LinkCallbacks {
     private val running = AtomicBoolean(false)
+    private val reconnecting = AtomicBoolean(false)
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var encoder: Encoder? = null
     private var link: Link? = null
     private var peer: Peer? = null
+    private var peersDb: Peers? = null
     private var displayW: Int = 0
     private var displayH: Int = 0
     private var captureBaseNs: Long = 0
     private val mainHandler = Handler(Looper.getMainLooper())
     private var projectionCallback: MediaProjection.Callback? = null
     private var displayListener: DisplayManager.DisplayListener? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var reconnectThread: Thread? = null
+    @Volatile
+    private var backoffMs: Long = 250
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -44,53 +58,59 @@ class MirrorService : Service(), LinkCallbacks {
             stopSession("stopped")
             return START_NOT_STICKY
         }
-        run {
-                val peerId = intent?.getStringExtra(EXTRA_PEER_ID) ?: run {
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA)
-                }
-                if (data == null || resultCode == 0) {
-                    stopSession("no projection")
-                    return START_NOT_STICKY
-                }
-                val p = Peers(this).list().firstOrNull { it.id == peerId }
-                if (p == null) {
-                    stopSession("unknown peer")
-                    return START_NOT_STICKY
-                }
-                if (running.getAndSet(true)) {
-                    stopSession("restarted")
-                }
-                peer = p
-                startForegroundNotif(p.name)
-                captureBaseNs = System.nanoTime()
-                val peers = Peers(this)
-                val lk = Link(p, peers.phoneId(), peers.phoneName(), this)
-                link = lk
-                val enc = Encoder(lk, captureBaseNs)
-                encoder = enc
-                readDisplaySize()
-                startProjection(resultCode, data, enc)
-                val start = Wire.Control.Start(
-                    width = enc.currentWidth(),
-                    height = enc.currentHeight(),
-                    fps = enc.currentFps(),
-                    bitrate = enc.currentBitrate(),
-                    codec = 1,
-                )
-                if (!lk.connect(start)) {
-                    return START_NOT_STICKY
-                }
-                registerDisplayListener()
-                return START_STICKY
+        val peerId = intent?.getStringExtra(EXTRA_PEER_ID) ?: run {
+            stopSelf()
+            return START_NOT_STICKY
         }
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+        val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_RESULT_DATA)
+        }
+        if (data == null || resultCode == 0) {
+            stopSession("no projection")
+            return START_NOT_STICKY
+        }
+        val p = Peers(this).list().firstOrNull { it.id == peerId }
+        if (p == null) {
+            stopSession("unknown peer")
+            return START_NOT_STICKY
+        }
+        if (running.getAndSet(true)) {
+            stopSession("restarted")
+        }
+        peer = p
+        peersDb = Peers(this)
+        startForegroundNotif(p.name, false)
+        captureBaseNs = System.nanoTime()
+        readDisplaySize()
+        val peers = Peers(this)
+        val lk = Link(p, peers.phoneId(), peers.phoneName(), this)
+        link = lk
+        val enc = Encoder(lk, captureBaseNs)
+        encoder = enc
+        startProjection(resultCode, data, enc)
+        pushInputScale(enc)
+        val start = Wire.Control.Start(
+            width = enc.currentWidth(),
+            height = enc.currentHeight(),
+            fps = enc.currentFps(),
+            bitrate = enc.currentBitrate(),
+            codec = 1,
+        )
+        registerDisplayListener()
+        registerNetworkCallback()
+        SessionBridge.sendClipboard = { text ->
+            lk.sendTcpSealed(Wire.encodeControl(Wire.Control.Clipboard(text)))
+        }
+        if (!lk.connect(start)) {
+            beginReconnect(immediate = false)
+        } else {
+            reconnecting.set(false)
+        }
+        return START_STICKY
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -100,6 +120,7 @@ class MirrorService : Service(), LinkCallbacks {
         val enc = encoder ?: return
         enc.restart(displayW, displayH, null)
         resetVirtualDisplay(enc.inputSurface)
+        pushInputScale(enc)
     }
 
     override fun onControl(c: Wire.Control) {
@@ -122,25 +143,127 @@ class MirrorService : Service(), LinkCallbacks {
                         needSurface = true
                     }
                     if (needSurface) resetVirtualDisplay(enc.inputSurface)
+                    pushInputScale(enc)
                 }
                 Wire.Control.Keyframe -> encoder?.requestKeyframe()
                 Wire.Control.Bye -> stopSession("bye")
-                is Wire.Control.Touch, is Wire.Control.Key, is Wire.Control.Text,
-                is Wire.Control.Clipboard,
-                -> {
+                is Wire.Control.Touch -> if (InputService.InputBridge.enabled()) {
+                    InputService.InputBridge.touch(c.action, c.pointer, c.x, c.y)
                 }
+                is Wire.Control.Key -> if (InputService.InputBridge.enabled()) InputService.InputBridge.key(c.code)
+                is Wire.Control.Text -> if (InputService.InputBridge.enabled()) InputService.InputBridge.text(c.text)
+                is Wire.Control.Clipboard -> applyDesktopClipboard(c.text)
                 else -> {}
             }
         }
     }
 
-    override fun onLost(reason: String) {
-        mainHandler.post { stopSession(reason) }
+    override fun onLinkDown(reason: String) {
+        mainHandler.post {
+            if (!running.get()) return@post
+            beginReconnect(immediate = false)
+        }
     }
 
     override fun onDestroy() {
         stopSession("destroy")
         super.onDestroy()
+    }
+
+    private fun applyDesktopClipboard(text: String) {
+        if (text == lastPhoneClipboardSent) return
+        lastDesktopClipboard = text
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("krapy", text))
+    }
+
+    private fun beginReconnect(immediate: Boolean) {
+        if (!running.get()) return
+        if (immediate) backoffMs = 250
+        link?.closeTransport()
+        updateNotifReconnecting()
+        reconnecting.set(true)
+        reconnectThread?.interrupt()
+        reconnectThread = thread(name = "krapy-reconn", isDaemon = true) {
+            reconnectLoop(immediate)
+        }
+    }
+
+    private fun reconnectLoop(immediate: Boolean) {
+        var delay = if (immediate) 0L else backoffMs
+        while (running.get() && reconnecting.get()) {
+            if (delay > 0) {
+                try {
+                    Thread.sleep(delay)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            if (!running.get() || !reconnecting.get()) break
+            val p = peer ?: break
+            val enc = encoder ?: break
+            val lk = link ?: break
+            val endpoint = PeerResolve.raceEndpoint(applicationContext, p.host, p.port, p.id)
+            if (endpoint == null) {
+                backoffMs = min(backoffMs * 2, 4000)
+                delay = backoffMs
+                continue
+            }
+            val (host, port) = endpoint
+            val start = Wire.Control.Start(
+                width = enc.currentWidth(),
+                height = enc.currentHeight(),
+                fps = enc.currentFps(),
+                bitrate = enc.currentBitrate(),
+                codec = 1,
+            )
+            if (lk.connect(start, host, port)) {
+                peersDb?.updateEndpoint(p.id, host, port)
+                peer = p.copy(host = host, port = port)
+                backoffMs = 250
+                reconnecting.set(false)
+                mainHandler.post {
+                    val name = peer?.name ?: ""
+                    startForegroundNotif(name, false)
+                    enc.requestKeyframe()
+                }
+                return
+            }
+            backoffMs = min(backoffMs * 2, 4000)
+            delay = backoffMs
+        }
+        reconnecting.set(false)
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (!running.get()) return
+                val lk = link ?: return
+                if (!lk.isConnected()) beginReconnect(immediate = true)
+            }
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                caps: NetworkCapabilities,
+            ) {
+                if (!running.get()) return
+                val lk = link ?: return
+                if (!lk.isConnected() && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    beginReconnect(immediate = true)
+                }
+            }
+        }
+        networkCallback = cb
+        try {
+            cm.registerNetworkCallback(NetworkRequest.Builder().build(), cb)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun pushInputScale(enc: Encoder) {
+        InputService.InputBridge.setVideoSize(enc.currentWidth(), enc.currentHeight(), displayW, displayH)
     }
 
     private fun startProjection(resultCode: Int, data: Intent, enc: Encoder) {
@@ -168,7 +291,7 @@ class MirrorService : Service(), LinkCallbacks {
     ): VirtualDisplay? {
         if (surface == null) return null
         val dpi = resources.displayMetrics.densityDpi
-        var flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
         return proj.createVirtualDisplay(
             "krapy",
             w,
@@ -200,6 +323,7 @@ class MirrorService : Service(), LinkCallbacks {
                 val enc = encoder ?: return
                 enc.restart(displayW, displayH, null)
                 resetVirtualDisplay(enc.inputSurface)
+                pushInputScale(enc)
             }
         }
         displayListener = listener
@@ -219,6 +343,18 @@ class MirrorService : Service(), LinkCallbacks {
         if (!running.getAndSet(false)) {
             return
         }
+        reconnecting.set(false)
+        reconnectThread?.interrupt()
+        reconnectThread = null
+        SessionBridge.sendClipboard = null
+        networkCallback?.let {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            try {
+                cm.unregisterNetworkCallback(it)
+            } catch (_: Exception) {
+            }
+        }
+        networkCallback = null
         displayListener?.let {
             val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
             dm.unregisterDisplayListener(it)
@@ -239,7 +375,7 @@ class MirrorService : Service(), LinkCallbacks {
         stopSelf()
     }
 
-    private fun startForegroundNotif(name: String) {
+    private fun startForegroundNotif(name: String, reconnect: Boolean) {
         ensureChannel()
         val stopPi = PendingIntent.getService(
             this,
@@ -247,9 +383,10 @@ class MirrorService : Service(), LinkCallbacks {
             Intent(this, MirrorService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val text = if (reconnect) "reconnecting" else "mirroring $name"
         val notif = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("krapy")
-            .setContentText("mirroring $name")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .addAction(
                 Notification.Action.Builder(
@@ -269,6 +406,11 @@ class MirrorService : Service(), LinkCallbacks {
         } else {
             startForeground(NOTIF_ID, notif)
         }
+    }
+
+    private fun updateNotifReconnecting() {
+        val name = peer?.name ?: ""
+        startForegroundNotif(name, true)
     }
 
     private fun updateNotifStopped(reason: String) {
@@ -299,6 +441,12 @@ class MirrorService : Service(), LinkCallbacks {
         const val EXTRA_RESULT_DATA = "result_data"
         private const val CHANNEL_ID = "krapy_mirror"
         private const val NOTIF_ID = 1
+
+        @Volatile
+        var lastDesktopClipboard: String? = null
+
+        @Volatile
+        var lastPhoneClipboardSent: String? = null
 
         fun start(context: Context, peerId: String, resultCode: Int, data: Intent) {
             val i = Intent(context, MirrorService::class.java).apply {
