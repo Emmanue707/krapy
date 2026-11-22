@@ -127,7 +127,7 @@ impl Listener {
         let addr = format!("0.0.0.0:{port}");
         let tcp = TcpListener::bind(&addr)?;
         let udp = UdpSocket::bind(&addr)?;
-        udp.set_nonblocking(true)?;
+        udp.set_read_timeout(Some(Duration::from_millis(50)))?;
         Ok(Self {
             tcp,
             udp,
@@ -468,8 +468,8 @@ fn udp_loop(
                     last_keyframe = Instant::now();
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
             }
             Err(_) => break,
         }
