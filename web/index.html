@@ -65,7 +65,7 @@
     <section aria-labelledby="how-heading">
       <h2 id="how-heading">How it works</h2>
       <ol class="steps">
-        <li>On the desktop, run <code>krapy pair</code> and leave it listening.</li>
+        <li>On the desktop, run <code>krapy pair</code>. Keep it running while the phone scans.</li>
         <li>Open the phone app and scan the QR code on screen.</li>
         <li>Mirror starts. If the phone&apos;s IP changes, mDNS finds the desktop again on its own.</li>
       </ol>
@@ -136,9 +136,17 @@
 
     <section aria-labelledby="status-heading">
       <h2 id="status-heading">Status</h2>
-      <p><span class="status-badge">v0.1.0</span></p>
+      <p><span class="status-badge">v0.1.1</span></p>
       <p>Get the Android APK and the desktop app for Linux, Windows or macOS from the <a href="https://github.com/Emmanue707/krapy/releases/latest">latest release</a>. Install the APK on the phone, run <code>krapy pair</code> on the computer, scan.</p>
       <p class="targets">Targets (not measured yet): under 50&nbsp;ms glass-to-glass on good Wi-Fi; under 30&nbsp;MB desktop RAM at idle.</p>
+    </section>
+
+    <section aria-labelledby="linux-heading">
+      <h2 id="linux-heading">Install on Linux</h2>
+      <p>No sudo needed. Unpack the release, then:</p>
+      <pre><code>mkdir -p ~/.local/bin &amp;&amp; cp krapy ~/.local/bin/
+krapy pair</code></pre>
+      <p>If <code>krapy</code> is not found, open a new terminal or add <code>~/.local/bin</code> to your <code>PATH</code>.</p>
     </section>
 
     </main>
