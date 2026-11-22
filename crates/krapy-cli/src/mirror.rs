@@ -15,6 +15,7 @@ use krapy_transport::{AcceptMode, CompleteFrame, Control, Listener, Session, Ses
 
 const PAIR_WINDOW: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(5);
+const SMALL_STACK: usize = 256 * 1024;
 
 type ControlSlot = Arc<Mutex<Option<Sender<Control>>>>;
 
@@ -233,19 +234,22 @@ fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -
         let source = source.clone();
         let stop = Arc::clone(&stop);
         let counters = Arc::clone(&counters);
-        thread::spawn(move || {
-            network_loop(
-                frames,
-                annexb,
-                stats_win,
-                control_tx,
-                control_rx,
-                Adaptive::new(ceiling),
-                source,
-                stop,
-                counters,
-            );
-        })
+        thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn(move || {
+                network_loop(
+                    frames,
+                    annexb,
+                    stats_win,
+                    control_tx,
+                    control_rx,
+                    Adaptive::new(ceiling),
+                    source,
+                    stop,
+                    counters,
+                );
+            })
+            .expect("net thread")
     };
 
     let dec = {
@@ -264,7 +268,10 @@ fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -
         let counters = Arc::clone(&counters);
         let stats_win = Arc::clone(&session.stats_window);
         let stop = Arc::clone(&stats_stop);
-        thread::spawn(move || stats_loop(counters, stats_win, stop))
+        thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn(move || stats_loop(counters, stats_win, stop))
+            .expect("stats thread")
     });
 
     while !stop.load(Ordering::Relaxed) {
