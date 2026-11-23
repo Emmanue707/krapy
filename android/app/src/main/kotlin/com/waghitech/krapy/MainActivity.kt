@@ -18,12 +18,10 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -41,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var pairedLabel: TextView
     private lateinit var emptyPeers: TextView
     private var peerRows: List<Peer> = emptyList()
+    private var peerAdapter: PeerAdapter? = null
     private var pendingPeer: Peer? = null
     private var remoteHintText = "remote control needs accessibility (optional)"
     private val basePadH by lazy { dp(20) }
@@ -261,14 +260,11 @@ class MainActivity : Activity() {
     private fun refreshList() {
         peerRows = peers.list()
         emptyPeers.visibility = if (peerRows.isEmpty()) View.VISIBLE else View.GONE
-        val labels = peerRows.map { "${it.name}\n${it.host}:${it.port}" }
-        listView.adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_2, labels) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val v = super.getView(position, convertView, parent) as TextView
-                v.setTextColor(textPrimary())
-                v.gravity = Gravity.CENTER_VERTICAL
-                return v
-            }
+        val adapter = peerAdapter
+        if (adapter == null) {
+            peerAdapter = PeerAdapter(this, peerRows, textPrimary(), textSecondary()).also { listView.adapter = it }
+        } else {
+            adapter.update(peerRows)
         }
         refreshStatus()
     }
