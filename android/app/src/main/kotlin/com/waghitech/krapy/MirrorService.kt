@@ -50,6 +50,8 @@ class MirrorService : Service(), LinkCallbacks {
     private var displayListener: DisplayManager.DisplayListener? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var reconnectThread: Thread? = null
+    private var sessionHost: String? = null
+    private var sessionPort: Int? = null
     @Volatile
     private var backoffMs: Long = 250
 
@@ -86,7 +88,15 @@ class MirrorService : Service(), LinkCallbacks {
             }
             running.set(true)
             lastProblem = null
-            peer = p
+            sessionHost = intent.getStringExtra(EXTRA_HOST)
+            val portExtra = intent.getIntExtra(EXTRA_PORT, -1)
+            sessionPort = portExtra.takeIf { it in 1..65535 }
+            val linkPeer = if (sessionHost != null && sessionPort != null) {
+                p.copy(host = sessionHost!!, port = sessionPort!!)
+            } else {
+                p
+            }
+            peer = linkPeer
             activePeerName = p.name
             peersDb = Peers(this)
             startForegroundNotif(p.name, false)
@@ -95,7 +105,7 @@ class MirrorService : Service(), LinkCallbacks {
             lastKnownDisplayW = displayW
             lastKnownDisplayH = displayH
             val peers = Peers(this)
-            val lk = Link(p, peers.phoneId(), peers.phoneName(), this)
+            val lk = Link(linkPeer, peers.phoneId(), peers.phoneName(), this)
             link = lk
             connecting.set(true)
             val enc = Encoder(lk, captureBaseNs)
@@ -266,7 +276,9 @@ class MirrorService : Service(), LinkCallbacks {
             )
             if (lk.connect(start, host, port)) {
                 lastProblem = null
-                peersDb?.updateEndpoint(p.id, host, port)
+                if (!isLoopbackHost(host)) {
+                    peersDb?.updateEndpoint(p.id, host, port)
+                }
                 peer = p.copy(host = host, port = port)
                 backoffMs = 250
                 reconnecting.set(false)
@@ -520,6 +532,8 @@ class MirrorService : Service(), LinkCallbacks {
         const val EXTRA_PEER_ID = "peer_id"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
+        const val EXTRA_HOST = "host"
+        const val EXTRA_PORT = "port"
         private const val CHANNEL_ID = "krapy_mirror"
         private const val NOTIF_ID = 1
 
@@ -535,11 +549,25 @@ class MirrorService : Service(), LinkCallbacks {
         @Volatile
         var lastProblem: String? = null
 
-        fun start(context: Context, peerId: String, resultCode: Int, data: Intent) {
+        private fun isLoopbackHost(host: String): Boolean =
+            host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)
+
+        fun start(
+            context: Context,
+            peerId: String,
+            resultCode: Int,
+            data: Intent,
+            hostOverride: String? = null,
+            portOverride: Int? = null,
+        ) {
             val i = Intent(context, MirrorService::class.java).apply {
                 putExtra(EXTRA_PEER_ID, peerId)
                 putExtra(EXTRA_RESULT_CODE, resultCode)
                 putExtra(EXTRA_RESULT_DATA, data)
+                if (hostOverride != null && portOverride != null) {
+                    putExtra(EXTRA_HOST, hostOverride)
+                    putExtra(EXTRA_PORT, portOverride)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(i)

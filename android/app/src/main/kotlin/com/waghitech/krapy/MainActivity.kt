@@ -41,6 +41,8 @@ class MainActivity : Activity() {
     private var peerRows: List<Peer> = emptyList()
     private var peerAdapter: PeerAdapter? = null
     private var pendingPeer: Peer? = null
+    private var pendingHostOverride: String? = null
+    private var pendingPortOverride: Int? = null
     private var remoteHintText = "remote control needs accessibility (optional)"
     private val basePadH by lazy { dp(20) }
     private val basePadTop by lazy { dp(16) }
@@ -139,14 +141,14 @@ class MainActivity : Activity() {
             true
         }
         refreshList()
-        handlePairIntent(intent)
+        handleViewIntent(intent)
         maybeRequestNotif()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handlePairIntent(intent)
+        handleViewIntent(intent)
     }
 
     override fun onResume() {
@@ -200,7 +202,16 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "capture denied", Toast.LENGTH_SHORT).show()
                     return
                 }
-                MirrorService.start(this, peer.id, resultCode, data)
+                MirrorService.start(
+                    this,
+                    peer.id,
+                    resultCode,
+                    data,
+                    pendingHostOverride,
+                    pendingPortOverride,
+                )
+                pendingHostOverride = null
+                pendingPortOverride = null
                 refreshStatus()
             }
         } catch (t: Throwable) {
@@ -213,7 +224,9 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_NOTIF) {
             val peer = pendingPeer
-            if (peer != null) beginCapture(peer)
+            if (peer != null) {
+                beginCapture(peer, pendingHostOverride, pendingPortOverride)
+            }
         }
     }
 
@@ -233,10 +246,34 @@ class MainActivity : Activity() {
         pairUri(uriField.text.toString())
     }
 
-    private fun handlePairIntent(intent: Intent?) {
-        val uri = intent?.data?.toString() ?: return
+    private fun handleViewIntent(intent: Intent?) {
+        val uri = intent?.data ?: return
         if (intent.action != Intent.ACTION_VIEW) return
-        pairUri(uri)
+        when (uri.host) {
+            "pair" -> pairUri(uri.toString())
+            "connect" -> connectUri(uri.toString())
+        }
+    }
+
+    private fun connectUri(raw: String) {
+        try {
+            val data = Pairing.parseConnect(raw)
+            val peer = peers.list().firstOrNull { it.id == data.desktopId }
+            if (peer == null) {
+                Toast.makeText(
+                    this,
+                    "this PC isn't paired yet, run krapy connect --usb again",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return
+            }
+            startMirroring(peer, data.host, data.port)
+        } catch (e: PairingException) {
+            Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
+        } catch (t: Throwable) {
+            CrashLog.record(this, t, "connectUri")
+            Toast.makeText(this, t.message ?: "connect failed", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun pairUri(raw: String) {
@@ -339,25 +376,37 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun startMirroring(peer: Peer) {
+    private fun startMirroring(
+        peer: Peer,
+        hostOverride: String? = null,
+        portOverride: Int? = null,
+    ) {
         try {
             if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) {
                 pendingPeer = peer
+                pendingHostOverride = hostOverride
+                pendingPortOverride = portOverride
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
                 return
             }
-            beginCapture(peer)
+            beginCapture(peer, hostOverride, portOverride)
         } catch (t: Throwable) {
             CrashLog.record(this, t, "startMirroring")
             Toast.makeText(this, t.message ?: "mirror failed", Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun beginCapture(peer: Peer) {
+    private fun beginCapture(
+        peer: Peer,
+        hostOverride: String? = null,
+        portOverride: Int? = null,
+    ) {
         try {
             pendingPeer = peer
+            pendingHostOverride = hostOverride
+            pendingPortOverride = portOverride
             val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
         } catch (t: Throwable) {
