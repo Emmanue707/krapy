@@ -25,9 +25,11 @@ class Encoder(
     private var bitrate: Int = 4_000_000
     private var maxSize: Int = 1280
     private var frameId: Int = 0
-    private val chunkBuf = ByteArray(Wire.MAX_VIDEO_DATA)
+    private val chunkBuf = ByteArray(Wire.MAX_TCP_VIDEO)
+    @Volatile
     private var codecConfig: ByteArray? = null
-    private var needConfigBeforeKeyframe: Boolean = false
+    @Volatile
+    private var lastSyncRequestMs: Long = 0
     var inputSurface: Surface? = null
         private set
 
@@ -116,6 +118,9 @@ class Encoder(
     }
 
     fun requestKeyframe() {
+        val now = System.currentTimeMillis()
+        if (now - lastSyncRequestMs < 150) return
+        lastSyncRequestMs = now
         val c = codec ?: return
         val b = Bundle()
         b.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
@@ -173,13 +178,14 @@ class Encoder(
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         if (rich) {
             format.setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 format.setInteger(MediaFormat.KEY_PRIORITY, 0)
             }
             format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 try {
                     format.setInteger(
@@ -244,11 +250,7 @@ class Encoder(
                     val newFmt = c.outputFormat
                     val csd0 = newFmt.getByteBuffer("csd-0")
                     val csd1 = newFmt.getByteBuffer("csd-1")
-                    if (csd0 != null) {
-                        val cfg = annexB(csd0, csd1)
-                        codecConfig = cfg
-                        needConfigBeforeKeyframe = true
-                    }
+                    if (csd0 != null) codecConfig = annexB(csd0, csd1)
                 }
                 idx >= 0 -> {
                     val out = c.getOutputBuffer(idx) ?: continue
@@ -261,10 +263,11 @@ class Encoder(
                         out.get(data)
                         val captureUs = captureUs(info.presentationTimeUs)
                         if (flags and Wire.VIDEO_FLAG_CODEC_CONFIG != 0) {
+                            // kept and sent in front of every keyframe instead
                             codecConfig = data
-                            needConfigBeforeKeyframe = true
+                        } else {
+                            sendFrame(data, flags, captureUs)
                         }
-                        sendFrame(data, flags, captureUs)
                     }
                     c.releaseOutputBuffer(idx, false)
                 }
@@ -273,18 +276,17 @@ class Encoder(
     }
 
     private fun sendFrame(data: ByteArray, flags: Int, captureUs: Long) {
-        var wireFlags = flags
         val cfg = codecConfig
-        if (wireFlags and Wire.VIDEO_FLAG_KEYFRAME != 0 && cfg != null && needConfigBeforeKeyframe) {
-            sendOneFrame(cfg, Wire.VIDEO_FLAG_CODEC_CONFIG, captureUs)
-            needConfigBeforeKeyframe = false
+        if (flags and Wire.VIDEO_FLAG_KEYFRAME != 0 && cfg != null && !Annex.hasSps(data)) {
+            sendOneFrame(cfg + data, flags, captureUs)
+        } else {
+            sendOneFrame(data, flags, captureUs)
         }
-        sendOneFrame(data, wireFlags, captureUs)
     }
 
     private fun sendOneFrame(data: ByteArray, flags: Int, captureUs: Long) {
         val id = frameId
-        val chunk = Wire.MAX_VIDEO_DATA
+        val chunk = link.maxChunk()
         val count = (data.size + chunk - 1) / chunk
         var off = 0
         var idx = 0
