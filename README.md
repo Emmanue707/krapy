@@ -133,7 +133,15 @@ Wireless debugging: `krapy adb pair <ip:port> <code>` then `krapy connect --usb`
 
 Useful flags: `--preset high-quality|balanced|low-latency|hotspot`,
 `--bitrate`, `--fps`, `--max-size`, `--decoder ffmpeg|openh264`, `--stats`,
-`--no-window`.
+`--no-window`, `--no-audio`, `connect --usb --show-touches`.
+
+## While connected
+
+On the phone, the krapy home screen shows live stats and controls when mirroring:
+quality (Smooth / Balanced / Sharp), pause, rotate the PC window, sound on PC
+or phone, keep the screen awake, clipboard sync, and disconnect. The
+notification has the same quick actions. On the PC, `krapy connect` plays phone
+audio when the phone enables **Sound on PC** (`--no-audio` skips playback).
 
 Touch and key input from the desktop need the krapy accessibility service
 turned on in the phone's settings. Viewing works without it.
