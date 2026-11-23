@@ -58,6 +58,7 @@ class Encoder(
         height = h
         codec = createCodec(w, h)
         inputSurface = codec?.createInputSurface()
+            ?: throw IllegalStateException("encoder: no input surface")
         codec?.start()
         stop.set(false)
         drainThread = thread(name = "krapy-enc", isDaemon = true) { drainLoop() }
@@ -109,6 +110,7 @@ class Encoder(
         releaseCodec()
         codec = createCodec(w, h)
         inputSurface = codec?.createInputSurface()
+            ?: throw IllegalStateException("encoder: no input surface")
         codec?.start()
         stop.set(false)
         drainThread = thread(name = "krapy-enc", isDaemon = true) { drainLoop() }
@@ -136,6 +138,7 @@ class Encoder(
         height = nh
         codec = createCodec(nw, nh)
         inputSurface = codec?.createInputSurface()
+            ?: throw IllegalStateException("encoder: no input surface")
         codec?.start()
         stop.set(false)
         drainThread = thread(name = "krapy-enc", isDaemon = true) { drainLoop() }
@@ -145,42 +148,57 @@ class Encoder(
     }
 
     private fun createCodec(w: Int, h: Int): MediaCodec {
+        var lastMsg = "unknown"
+        try {
+            return configureCodec(w, h, rich = true)
+        } catch (e: Exception) {
+            lastMsg = e.message ?: e.javaClass.simpleName
+        }
+        try {
+            return configureCodec(w, h, rich = false)
+        } catch (e: Exception) {
+            lastMsg = e.message ?: e.javaClass.simpleName
+        }
+        val scale = min(min(720.0 / w, 720.0 / h), 1.0)
+        val rw = align16(max(16, (w * scale).roundToInt()))
+        val rh = align16(max(16, (h * scale).roundToInt()))
+        try {
+            return configureCodec(rw, rh, rich = false)
+        } catch (e: Exception) {
+            throw IllegalStateException("encoder: ${e.message ?: lastMsg}")
+        }
+    }
+
+    private fun configureCodec(w: Int, h: Int, rich: Boolean): MediaCodec {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-        format.setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            format.setInteger(MediaFormat.KEY_PRIORITY, 0)
-        }
-        format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            try {
-                format.setInteger(
-                    MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
-                )
-            } catch (_: Exception) {
-                format.setInteger(
-                    MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
-                )
+        if (rich) {
+            format.setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                format.setInteger(MediaFormat.KEY_PRIORITY, 0)
             }
+            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    format.setInteger(
+                        MediaFormat.KEY_BITRATE_MODE,
+                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
+                    )
+                } catch (_: Exception) {
+                    format.setInteger(
+                        MediaFormat.KEY_BITRATE_MODE,
+                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
+                    )
+                }
+            }
+            trySetProfile(format)
+            trySetLowLatency(format)
         }
-        trySetProfile(format)
-        trySetLowLatency(format)
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        try {
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        } catch (_: Exception) {
-            val safe = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
-            safe.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            safe.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            safe.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            safe.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-            codec.configure(safe, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        }
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         return codec
     }
 
