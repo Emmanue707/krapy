@@ -2,11 +2,11 @@ use std::time::{Duration, Instant};
 
 use crate::preset::Quality;
 
-const FLOOR_BITRATE: u32 = 500_000;
+const FLOOR_BITRATE: u32 = 2_000_000;
 const FLOOR_FPS: u8 = 15;
 const FPS_LOW_BITRATE: u32 = 1_500_000;
 const FPS_HIGH_BITRATE: u32 = 2_500_000;
-const STEP_UP_AFTER: Duration = Duration::from_secs(4);
+const STEP_UP_AFTER: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NetStats {
@@ -22,6 +22,7 @@ pub struct Adaptive {
     ceiling: Quality,
     baseline_rtt_ms: Option<f32>,
     clean_since: Option<Instant>,
+    loss_windows: u8,
 }
 
 impl Adaptive {
@@ -31,7 +32,15 @@ impl Adaptive {
             ceiling,
             baseline_rtt_ms: None,
             clean_since: None,
+            loss_windows: 0,
         }
+    }
+
+    pub fn set_ceiling(&mut self, ceiling: Quality) {
+        self.ceiling = ceiling;
+        self.current = ceiling;
+        self.clean_since = None;
+        self.loss_windows = 0;
     }
 
     pub fn quality(&self) -> Quality {
@@ -49,21 +58,24 @@ impl Adaptive {
         }
     }
 
-    fn should_step_down(&self, stats: &NetStats) -> bool {
-        if stats.loss > 0.02 {
-            return true;
-        }
-        if stats.jitter_ms > 30.0 {
-            return true;
-        }
-        if stats.late_frames > 0 {
-            return true;
-        }
+    fn rtt_spike(&self, stats: &NetStats) -> bool {
         let Some(base) = self.baseline_rtt_ms else {
             return false;
         };
         let threshold = (base * 2.0).max(base + 40.0);
         stats.rtt_ms > threshold
+    }
+
+    fn should_step_down(&mut self, stats: &NetStats) -> bool {
+        if stats.loss > 0.02 {
+            self.loss_windows = self.loss_windows.saturating_add(1);
+        } else {
+            self.loss_windows = 0;
+        }
+        if self.loss_windows >= 2 {
+            return true;
+        }
+        self.rtt_spike(stats)
     }
 
     fn apply_fps_hysteresis(&mut self) {
@@ -75,8 +87,13 @@ impl Adaptive {
     }
 
     fn clamp_floor(&mut self) {
-        if self.current.bitrate < FLOOR_BITRATE {
-            self.current.bitrate = FLOOR_BITRATE;
+        let floor = if self.ceiling.bitrate < FLOOR_BITRATE {
+            self.ceiling.bitrate
+        } else {
+            FLOOR_BITRATE
+        };
+        if self.current.bitrate < floor {
+            self.current.bitrate = floor;
         }
         if self.current.fps < FLOOR_FPS {
             self.current.fps = FLOOR_FPS;
@@ -100,10 +117,11 @@ impl Adaptive {
         self.update_baseline(stats.rtt_ms);
 
         if self.should_step_down(&stats) {
-            self.current.bitrate = ((self.current.bitrate as f64) * 0.7) as u32;
+            self.current.bitrate = ((self.current.bitrate as f64) * 0.85) as u32;
             self.apply_fps_hysteresis();
             self.clamp_floor();
             self.clean_since = None;
+            self.loss_windows = 0;
         } else {
             match self.clean_since {
                 None => self.clean_since = Some(now),
@@ -152,11 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn down_fast_on_loss() {
+    fn down_after_two_lossy_windows() {
         let mut a = Adaptive::new(ceiling());
         let t0 = Instant::now();
         let _ = a.on_window(clean_stats(20.0), t0);
-        let q = a.on_window(
+        let q1 = a.on_window(
             NetStats {
                 rtt_ms: 20.0,
                 jitter_ms: 0.0,
@@ -165,12 +183,22 @@ mod tests {
             },
             t0,
         );
-        assert!(q.is_some());
+        assert!(q1.is_none());
+        let q2 = a.on_window(
+            NetStats {
+                rtt_ms: 20.0,
+                jitter_ms: 0.0,
+                loss: 0.03,
+                late_frames: 0,
+            },
+            t0 + Duration::from_millis(500),
+        );
+        assert!(q2.is_some());
         assert!(a.quality().bitrate < ceiling().bitrate);
     }
 
     #[test]
-    fn up_slow_requires_four_seconds() {
+    fn up_slow_requires_three_seconds() {
         let mut a = Adaptive::new(ceiling());
         let t0 = Instant::now();
         let _ = a.on_window(
@@ -182,12 +210,21 @@ mod tests {
             },
             t0,
         );
+        let _ = a.on_window(
+            NetStats {
+                rtt_ms: 20.0,
+                jitter_ms: 0.0,
+                loss: 0.05,
+                late_frames: 0,
+            },
+            t0 + Duration::from_millis(500),
+        );
         let after_down = a.quality().bitrate;
         let t1 = t0 + Duration::from_secs(1);
         let _ = a.on_window(clean_stats(20.0), t1);
         let q1 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(2));
         assert!(q1.is_none());
-        let q2 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(4));
+        let q2 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(3));
         assert!(q2.is_some());
         assert!(a.quality().bitrate > after_down);
     }
@@ -217,6 +254,15 @@ mod tests {
                 },
                 t0,
             );
+            let _ = a.on_window(
+                NetStats {
+                    rtt_ms: 500.0,
+                    jitter_ms: 50.0,
+                    loss: 0.5,
+                    late_frames: 1,
+                },
+                t0,
+            );
         }
         assert!(a.quality().bitrate >= FLOOR_BITRATE);
         assert!(a.quality().fps >= FLOOR_FPS);
@@ -228,24 +274,20 @@ mod tests {
         let t0 = Instant::now();
         let _ = a.on_window(clean_stats(20.0), t0);
         for _ in 0..30 {
-            let _ = a.on_window(
-                NetStats {
-                    rtt_ms: 20.0,
-                    jitter_ms: 0.0,
-                    loss: 0.1,
-                    late_frames: 0,
-                },
-                t0,
-            );
+            let bad = NetStats {
+                rtt_ms: 20.0,
+                jitter_ms: 0.0,
+                loss: 0.1,
+                late_frames: 0,
+            };
+            let _ = a.on_window(bad, t0);
+            let _ = a.on_window(bad, t0);
         }
-        assert!(a.quality().bitrate < FPS_LOW_BITRATE);
-        assert_eq!(a.quality().fps, 30);
+        assert_eq!(a.quality().bitrate, FLOOR_BITRATE);
 
-        for _ in 0..10 {
-            let _ = a.on_window(clean_stats(20.0), t0 + Duration::from_secs(60));
+        for i in 0..6 {
+            let _ = a.on_window(clean_stats(20.0), t0 + Duration::from_secs(3 * (i + 1)));
         }
-        if a.quality().bitrate > FPS_HIGH_BITRATE {
-            assert_eq!(a.quality().fps, ceiling().fps);
-        }
+        assert!(a.quality().bitrate > FLOOR_BITRATE);
     }
 }
