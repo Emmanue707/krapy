@@ -128,6 +128,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(8) }
         })
         setContentView(root)
+        maybeShowLastCrash()
         refreshRemoteBlock()
         refreshStatus()
         listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
@@ -140,7 +141,6 @@ class MainActivity : Activity() {
         refreshList()
         handlePairIntent(intent)
         maybeRequestNotif()
-        maybeShowLastCrash()
     }
 
     override fun onNewIntent(intent: Intent) {
