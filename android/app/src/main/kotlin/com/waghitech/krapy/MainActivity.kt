@@ -27,7 +27,10 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import android.widget.Switch
 import android.widget.Toast
+import android.os.Handler
+import android.os.Looper
 import kotlin.math.max
 
 class MainActivity : Activity() {
@@ -47,6 +50,25 @@ class MainActivity : Activity() {
     private var pendingResumeCapture = false
     private var resumedNow = false
     private var usbPromptBlock: LinearLayout? = null
+    private var connectedCard: LinearLayout? = null
+    private var connectedTitle: TextView? = null
+    private var connectedStats: TextView? = null
+    private var soundSwitch: Switch? = null
+    private var wakeSwitch: Switch? = null
+    private var clipSwitch: Switch? = null
+    private var pauseButton: Button? = null
+    private var presetSmooth: Button? = null
+    private var presetBalanced: Button? = null
+    private var presetSharp: Button? = null
+    private val tickHandler = Handler(Looper.getMainLooper())
+    private val tickRunnable = object : Runnable {
+        override fun run() {
+            if (resumedNow && SessionState.mirroring) {
+                refreshConnectedCard()
+                tickHandler.postDelayed(this, 1000)
+            }
+        }
+    }
     private val basePadH by lazy { dp(20) }
     private val basePadTop by lazy { dp(16) }
     private val basePadBottom by lazy { dp(20) }
@@ -81,6 +103,7 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(16))
         }
         root.addView(statusLine)
+        connectedCard = buildConnectedCard().also { root.addView(it) }
         remoteBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -157,6 +180,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         resumedNow = false
+        tickHandler.removeCallbacks(tickRunnable)
     }
 
     override fun onResume() {
@@ -186,12 +210,17 @@ class MainActivity : Activity() {
                 beginCapture(peer, pendingHostOverride, pendingPortOverride)
             }
         }
+        refreshConnectedVisibility()
+        if (SessionState.mirroring) {
+            tickHandler.post(tickRunnable)
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus) return
         if (Build.VERSION.SDK_INT < 29) return
+        if (!SessionBridge.clipboardSync) return
         val send = SessionBridge.sendClipboard ?: return
         val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         val clip = cm.primaryClip ?: return
@@ -245,6 +274,22 @@ class MainActivity : Activity() {
             val peer = pendingPeer
             if (peer != null) {
                 beginCapture(peer, pendingHostOverride, pendingPortOverride)
+            }
+        }
+        if (requestCode == REQ_AUDIO) {
+            val ok = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            val sw = soundSwitch
+            if (!ok) {
+                sw?.isChecked = false
+                SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_SOUND_PC, false).apply()
+                Toast.makeText(
+                    this,
+                    "mic permission is needed to send sound to the PC",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            } else if (sw?.isChecked == true) {
+                sendServiceBool(MirrorService.ACTION_SOUND_PC, true)
             }
         }
     }
@@ -345,12 +390,14 @@ class MainActivity : Activity() {
     private fun refreshStatus() {
         val mirroring = MirrorService.activePeerName
         val base = when {
+            SessionState.mirroring && mirroring != null -> "connected"
             mirroring != null -> "mirroring to $mirroring"
             peerRows.isNotEmpty() -> "paired (${peerRows.size} desktop${if (peerRows.size == 1) "" else "s"})"
             else -> "idle"
         }
         val problem = MirrorService.lastProblem
         statusLine.text = if (problem != null) "$base\n$problem" else base
+        refreshConnectedVisibility()
     }
 
     private fun uiPrefs() = getSharedPreferences(PREFS_UI, Context.MODE_PRIVATE)
@@ -484,7 +531,184 @@ class MainActivity : Activity() {
     }
 
     private fun stopMirrorService() {
-        startService(Intent(this, MirrorService::class.java).setAction(MirrorService.ACTION_STOP))
+        startService(Intent(this, MirrorService::class.java).setAction(MirrorService.ACTION_DISCONNECT))
+    }
+
+    private fun buildConnectedCard(): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = GradientDrawable().apply {
+                setStroke(dp(1), accentColor())
+                cornerRadius = dp(8).toFloat()
+                setColor(0x08000000)
+            }
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) }
+        }
+        connectedTitle = TextView(this).apply {
+            textSize = 16f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(textPrimary())
+        }
+        card.addView(connectedTitle)
+        connectedStats = TextView(this).apply {
+            textSize = 13f
+            setTextColor(textSecondary())
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        card.addView(connectedStats)
+        card.addView(labelRow("Quality"))
+        val presetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        presetSmooth = presetChip(presetRow, "Smooth", SessionPrefs.PRESET_SMOOTH)
+        presetBalanced = presetChip(presetRow, "Balanced", SessionPrefs.PRESET_BALANCED)
+        presetSharp = presetChip(presetRow, "Sharp", SessionPrefs.PRESET_SHARP)
+        card.addView(presetRow)
+        soundSwitch = toggleRow(card, "Sound on PC") { on ->
+            onSoundPcToggled(on)
+        }
+        wakeSwitch = toggleRow(card, "Keep screen awake") { on ->
+            SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_KEEP_AWAKE, on).apply()
+            sendServiceBool(MirrorService.ACTION_WAKE, on)
+        }
+        clipSwitch = toggleRow(card, "Sync clipboard") { on ->
+            SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_CLIPBOARD, on).apply()
+            sendServiceBool(MirrorService.ACTION_CLIPBOARD, on)
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        pauseButton = secondaryButton("Pause") {
+            startService(Intent(this, MirrorService::class.java).setAction(MirrorService.ACTION_TOGGLE_PAUSE))
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        row.addView(pauseButton)
+        row.addView(secondaryButton("Rotate PC") {
+            startService(Intent(this, MirrorService::class.java).setAction(MirrorService.ACTION_ROTATE))
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(8)
+            }
+        })
+        card.addView(row)
+        card.addView(primaryButton("Disconnect") { stopMirrorService() }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) }
+        })
+        soundSwitch?.isChecked = SessionPrefs.soundOnPc(this)
+        wakeSwitch?.isChecked = SessionPrefs.keepAwake(this)
+        clipSwitch?.isChecked = SessionPrefs.clipboardSync(this)
+        updatePresetHighlight(SessionPrefs.preset(this))
+        return card
+    }
+
+    private fun labelRow(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = 12f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(textSecondary())
+            setPadding(0, dp(4), 0, dp(4))
+        }
+
+    private fun toggleRow(parent: LinearLayout, label: String, on: (Boolean) -> Unit): Switch {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(2), 0, dp(2))
+        }
+        row.addView(TextView(this).apply {
+            text = label
+            textSize = 14f
+            setTextColor(textPrimary())
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        val sw = Switch(this).apply {
+            setOnCheckedChangeListener { _, checked -> on(checked) }
+        }
+        row.addView(sw)
+        parent.addView(row)
+        return sw
+    }
+
+    private fun presetChip(parent: LinearLayout, label: String, id: Int): Button {
+        val b = secondaryButton(label) {
+            SessionPrefs.prefs(this).edit().putInt(SessionPrefs.PREF_PRESET, id).apply()
+            updatePresetHighlight(id)
+            startService(
+                Intent(this, MirrorService::class.java).apply {
+                    action = MirrorService.ACTION_SET_PRESET
+                    putExtra(MirrorService.EXTRA_PRESET, id)
+                },
+            )
+        }
+        b.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = dp(4)
+        }
+        parent.addView(b)
+        return b
+    }
+
+    private fun updatePresetHighlight(active: Int) {
+        val chips = listOf(
+            SessionPrefs.PRESET_SMOOTH to presetSmooth,
+            SessionPrefs.PRESET_BALANCED to presetBalanced,
+            SessionPrefs.PRESET_SHARP to presetSharp,
+        )
+        for ((id, btn) in chips) {
+            val on = id == active
+            btn?.setTextColor(if (on) 0xFFFFFFFF.toInt() else accentColor())
+            btn?.background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                if (on) setColor(accentColor()) else {
+                    setStroke(dp(1), accentColor())
+                    setColor(0)
+                }
+            }
+        }
+    }
+
+    private fun onSoundPcToggled(on: Boolean) {
+        if (on && Build.VERSION.SDK_INT >= 23 &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO)
+            return
+        }
+        SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_SOUND_PC, on).apply()
+        sendServiceBool(MirrorService.ACTION_SOUND_PC, on)
+    }
+
+    private fun sendServiceBool(action: String, on: Boolean) {
+        startService(
+            Intent(this, MirrorService::class.java).apply {
+                this.action = action
+                putExtra(MirrorService.EXTRA_BOOL, on)
+            },
+        )
+    }
+
+    private fun refreshConnectedVisibility() {
+        val show = SessionState.mirroring && MirrorService.activePeerName != null
+        connectedCard?.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) refreshConnectedCard()
+    }
+
+    private fun refreshConnectedCard() {
+        val snap = SessionState.snap
+        val name = snap.peerName.ifEmpty { MirrorService.activePeerName ?: "desktop" }
+        connectedTitle?.text = "Mirroring to $name"
+        connectedStats?.text = "${snap.transport} · ${SessionState.statsLine(snap)}"
+        pauseButton?.text = if (snap.paused) "Resume" else "Pause"
+        val sound = SessionState.audioOnPc
+        if (soundSwitch?.isChecked != sound) soundSwitch?.isChecked = sound
+        clipSwitch?.isChecked = SessionBridge.clipboardSync
     }
 
     private fun beginCapture(
@@ -628,6 +852,7 @@ class MainActivity : Activity() {
         private const val REQ_SCAN = 1
         private const val REQ_CAPTURE = 2
         private const val REQ_NOTIF = 3
+        private const val REQ_AUDIO = 4
         private const val PREFS_UI = "krapy_ui"
         private const val PREF_SENT_TO_APP_INFO = "sent_to_app_info"
     }
