@@ -47,6 +47,10 @@ class Link(
     private var pingWatchThread: Thread? = null
     private val tcpSender = Executors.newSingleThreadExecutor { r -> Thread(r, "krapy-tcp-send") }
 
+    @Volatile
+    var lastError: String? = null
+        private set
+
     fun isConnected(): Boolean = connected.get()
 
     fun peer(): Peer = peer
@@ -64,6 +68,7 @@ class Link(
         val p = port ?: peer.port
         closeTransport()
         transportStop.set(false)
+        lastError = null
         try {
             val socket = Socket()
             socket.connect(InetSocketAddress(h, p), 2000)
@@ -77,11 +82,13 @@ class Link(
             out.flush()
             if (inp.read(tcpLenBuf) != 2) {
                 socket.close()
+                lastError = "desktop closed the connection before answering"
                 return false
             }
             val wlen = Wire.readTcpFrameLength(tcpLenBuf)
             if (wlen < 0 || wlen > 65535) {
                 socket.close()
+                lastError = "bad reply from desktop"
                 return false
             }
             val welcomeBody = ByteArray(wlen)
@@ -90,6 +97,7 @@ class Link(
                 val n = inp.read(welcomeBody, got, wlen - got)
                 if (n < 0) {
                     socket.close()
+                    lastError = "desktop closed the connection mid-handshake"
                     return false
                 }
                 got += n
@@ -97,6 +105,7 @@ class Link(
             val (desktopId, nonceD) = Wire.decodeWelcome(welcomeBody)
             if (Wire.hexId(desktopId) != peer.id) {
                 socket.close()
+                lastError = "a different desktop answered at $h:$p, pair again"
                 return false
             }
             val keys = SessionKeys.derive(peer.secret, nonceP, nonceD)
@@ -132,10 +141,18 @@ class Link(
             startPingWatch()
             peer = peer.copy(host = h, port = p)
             return true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             closeTransport()
+            lastError = describe(e, h, p)
             return false
         }
+    }
+
+    private fun describe(e: Exception, h: String, p: Int): String = when (e) {
+        is java.net.ConnectException -> "nothing listening at $h:$p (is krapy running on the PC? firewall?)"
+        is java.net.SocketTimeoutException -> "no answer from $h:$p (same Wi-Fi? firewall?)"
+        is java.net.NoRouteToHostException -> "no route to $h (different network?)"
+        else -> "${e.javaClass.simpleName}: ${e.message ?: "connect failed"}"
     }
 
     fun sendFormat(width: Int, height: Int) {
@@ -254,6 +271,7 @@ class Link(
     private fun onTransportLost(reason: String) {
         if (halt.get()) return
         if (!connected.getAndSet(false)) return
+        lastError = reason
         closeTransport()
         callbacks.onLinkDown(reason)
     }
