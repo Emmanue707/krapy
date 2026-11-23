@@ -18,6 +18,7 @@ import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -44,7 +45,6 @@ class MirrorService : Service(), LinkCallbacks {
     private var displayH: Int = 0
     private var lastKnownDisplayW: Int = 0
     private var lastKnownDisplayH: Int = 0
-    private var captureBaseNs: Long = 0
     private val mainHandler = Handler(Looper.getMainLooper())
     private var projectionCallback: MediaProjection.Callback? = null
     private var displayListener: DisplayManager.DisplayListener? = null
@@ -54,6 +54,8 @@ class MirrorService : Service(), LinkCallbacks {
     private var sessionPort: Int? = null
     @Volatile
     private var backoffMs: Long = 250
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var statsThread: Thread? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -100,7 +102,6 @@ class MirrorService : Service(), LinkCallbacks {
             activePeerName = p.name
             peersDb = Peers(this)
             startForegroundNotif(p.name, false)
-            captureBaseNs = System.nanoTime()
             readDisplaySize()
             lastKnownDisplayW = displayW
             lastKnownDisplayH = displayH
@@ -108,7 +109,7 @@ class MirrorService : Service(), LinkCallbacks {
             val lk = Link(linkPeer, peers.phoneId(), peers.phoneName(), this)
             link = lk
             connecting.set(true)
-            val enc = Encoder(lk, captureBaseNs)
+            val enc = Encoder(lk)
             encoder = enc
             startProjection(resultCode, data, enc)
             pushInputScale(enc)
@@ -124,6 +125,10 @@ class MirrorService : Service(), LinkCallbacks {
             SessionBridge.sendClipboard = { text ->
                 lk.sendTcpSealed(Wire.encodeControl(Wire.Control.Clipboard(text)))
             }
+            if (!isLoopbackHost(linkPeer.host)) {
+                acquireWifiLock()
+            }
+            startStatsReporter()
             Workers.start("krapy-connect") {
                 val ok = try {
                     lk.connect(start)
@@ -344,7 +349,7 @@ class MirrorService : Service(), LinkCallbacks {
             proj.registerCallback(cb, mainHandler)
         }
         projection = proj
-        enc.start(displayW, displayH, 1280, 30, 4_000_000)
+        enc.start(displayW, displayH, 1920, 60, 12_000_000)
         val surface = enc.inputSurface
         try {
             virtualDisplay = createDisplay(proj, surface, enc.currentWidth(), enc.currentHeight())
@@ -435,7 +440,47 @@ class MirrorService : Service(), LinkCallbacks {
         stopSelf()
     }
 
+    private fun acquireWifiLock() {
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            @Suppress("DEPRECATION")
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        wifiLock = wm.createWifiLock(mode, "krapy-wifi").also { it.acquire() }
+    }
+
+    private fun releaseWifiLock() {
+        try {
+            wifiLock?.release()
+        } catch (_: Exception) {
+        }
+        wifiLock = null
+    }
+
+    private fun startStatsReporter() {
+        statsThread = Workers.start("krapy-stats") {
+            while (running.get()) {
+                try {
+                    Thread.sleep(1000)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (!running.get()) break
+                val enc = encoder ?: continue
+                val lk = link ?: continue
+                enc.drainEncoderStatsWindow()
+                val (avg, max, fps) = enc.encoderStats()
+                lk.sendPhoneStats(avg, max, fps, enc.currentBitrate())
+            }
+        }
+    }
+
     private fun teardown() {
+        statsThread?.interrupt()
+        statsThread = null
+        releaseWifiLock()
         running.set(false)
         connecting.set(false)
         activePeerName = null

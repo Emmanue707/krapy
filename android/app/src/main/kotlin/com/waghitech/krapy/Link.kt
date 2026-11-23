@@ -51,6 +51,12 @@ class Link(
     var lastError: String? = null
         private set
 
+    @Volatile
+    var latestDesktopStats: Wire.Control.DesktopStats? = null
+        private set
+
+    private val udpPlainTail = ByteArray(Wire.MAX_VIDEO_DATA)
+
     fun isConnected(): Boolean = connected.get()
 
     // adb can only tunnel tcp, so a loopback peer means usb: video goes over the tcp link
@@ -79,7 +85,8 @@ class Link(
         videoOverTcp = isLoopback(h)
         try {
             val socket = Socket()
-            if (videoOverTcp) socket.sendBufferSize = 128 * 1024
+            socket.sendBufferSize = 1024 * 1024
+            socket.trafficClass = 0xB8
             socket.connect(InetSocketAddress(h, p), 2000)
             socket.tcpNoDelay = true
             val inp = BufferedInputStream(socket.getInputStream())
@@ -140,6 +147,8 @@ class Link(
                 out.flush()
             }
             val dg = DatagramSocket()
+            dg.sendBufferSize = 1024 * 1024
+            dg.trafficClass = 0xB8
             dg.connect(InetSocketAddress(h, p))
             udp = dg
             writeUdpKeepalive(dg, udpSeal!!)
@@ -173,6 +182,40 @@ class Link(
         sendTcpSealed(Wire.encodeControl(Wire.Control.Format(width, height)))
     }
 
+    fun sendPreset(id: Int) = sendTcpSealed(Wire.encodePreset(id))
+
+    fun sendPaused(on: Boolean) = sendTcpSealed(Wire.encodePaused(on))
+
+    fun sendRotate() = sendTcpSealed(Wire.encodeRotate())
+
+    fun sendAudioState(on: Boolean) = sendTcpSealed(Wire.encodeAudioState(on))
+
+    fun sendPhoneStats(encAvgUs: Int, encMaxUs: Int, fps: Int, bitrate: Int) {
+        sendTcpSealed(Wire.encodePhoneStats(encAvgUs, encMaxUs, fps, bitrate))
+    }
+
+    fun sendAudio(seq: Int, ptsUs: Long, buf: ByteArray, off: Int, len: Int) {
+        if (!connected.get()) return
+        if (videoOverTcp) {
+            sendTcpSealedDirect(Wire.encodeAudioChunk(seq, ptsUs, buf, off, len))
+            return
+        }
+        val seal = udpSeal ?: return
+        val dg = udp ?: return
+        val body = Wire.encodeAudioDatagram(seq, ptsUs, buf, off, len)
+        val header = udpWireBuf
+        synchronized(udpSendLock) {
+            header[0] = body[0]
+            putU64(header, 1, seal.counter())
+            val plain = if (body.size <= 1) ByteArray(0) else body.copyOfRange(1, body.size)
+            val wire = seal.sealUdp(header.copyOfRange(0, 9), plain)
+            try {
+                dg.send(DatagramPacket(wire, wire.size))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun sendVideo(
         frameId: Int,
         idx: Int,
@@ -203,7 +246,12 @@ class Link(
         header[0] = body[0]
         synchronized(udpSendLock) {
             val plainLen = bodyLen - 1
-            val plain = if (plainLen == 0) ByteArray(0) else body.copyOfRange(1, bodyLen)
+            val plain = if (plainLen <= udpPlainTail.size) {
+                System.arraycopy(body, 1, udpPlainTail, 0, plainLen)
+                udpPlainTail.copyOf(plainLen)
+            } else {
+                body.copyOfRange(1, bodyLen)
+            }
             putU64(header, 1, seal.counter())
             val wire = seal.sealUdp(header.copyOfRange(0, 9), plain)
             try {
@@ -360,6 +408,9 @@ class Link(
                 } catch (_: WireException) {
                     continue
                 }
+                if (ctrl is Wire.Control.DesktopStats) {
+                    latestDesktopStats = ctrl
+                }
                 callbacks.onControl(ctrl)
             } catch (_: Exception) {
                 break
@@ -396,14 +447,15 @@ class Link(
     }
 
     private fun sendUdpPong(id: Int, tUs: Long) {
-        sendUdpRaw(Wire.DG_PONG, pingId = id, pingT = tUs)
+        val phoneUs = System.nanoTime() / 1000
+        sendUdpRaw(Wire.DG_PONG, pingId = id, pingT = tUs, phoneUs = phoneUs)
     }
 
-    private fun sendUdpRaw(type: Int, pingId: Int = 0, pingT: Long = 0) {
+    private fun sendUdpRaw(type: Int, pingId: Int = 0, pingT: Long = 0, phoneUs: Long = 0) {
         if (!connected.get()) return
         val seal = udpSeal ?: return
         val dg = udp ?: return
-        val body = Wire.encodeDatagramBody(type, pingId = pingId, pingT = pingT)
+        val body = Wire.encodeDatagramBody(type, pingId = pingId, pingT = pingT, phoneUs = phoneUs)
         val header = udpWireBuf
         synchronized(udpSendLock) {
             header[0] = body[0]
