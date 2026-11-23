@@ -330,6 +330,8 @@ fn upload_plane(
 fn pick_present(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     if modes.contains(&wgpu::PresentMode::Mailbox) {
         wgpu::PresentMode::Mailbox
+    } else if modes.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
     } else {
         wgpu::PresentMode::AutoVsync
     }
