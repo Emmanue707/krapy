@@ -1330,6 +1330,7 @@ dependencies = [
  "mdns-sd",
  "rand",
  "sha2",
+ "socket2",
 ]
 
 [[package]]

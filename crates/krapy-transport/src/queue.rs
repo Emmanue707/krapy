@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use crate::reassembly::{CompleteFrame, FLAG_CODEC_CONFIG, FLAG_KEYFRAME};
 
@@ -16,6 +17,7 @@ struct State {
 #[derive(Default)]
 pub struct FrameQueue {
     s: Mutex<State>,
+    ready: Condvar,
 }
 
 impl FrameQueue {
@@ -36,10 +38,12 @@ impl FrameQueue {
             s.q.retain(is_config);
             s.need_key = false;
             s.q.push_back(f);
+            self.ready.notify_one();
             return false;
         }
         if is_config(&f) {
             s.q.push_back(f);
+            self.ready.notify_one();
             return false;
         }
         if s.need_key {
@@ -54,11 +58,21 @@ impl FrameQueue {
             return true;
         }
         s.q.push_back(f);
+        self.ready.notify_one();
         false
     }
 
     pub fn pop(&self) -> Option<CompleteFrame> {
         self.s.lock().ok().and_then(|mut s| s.q.pop_front())
+    }
+
+    pub fn pop_wait(&self, timeout: Duration) -> Option<CompleteFrame> {
+        let s = self.s.lock().ok()?;
+        let (mut s, _) = self
+            .ready
+            .wait_timeout_while(s, timeout, |s| s.q.is_empty())
+            .ok()?;
+        s.q.pop_front()
     }
 
     // the decoder lost its reference: drop until the next keyframe
@@ -92,6 +106,75 @@ fn is_config(f: &CompleteFrame) -> bool {
     f.flags & FLAG_CODEC_CONFIG != 0 && f.flags & FLAG_KEYFRAME == 0
 }
 
+const MAX_AUDIO_AGE_US: u64 = 80_000;
+
+struct AudioPacket {
+    seq: u32,
+    pts_us: u64,
+    data: Vec<u8>,
+}
+
+#[derive(Default)]
+struct AudioState {
+    q: VecDeque<AudioPacket>,
+}
+
+pub struct AudioQueue {
+    s: Mutex<AudioState>,
+}
+
+impl AudioQueue {
+    pub fn new() -> Self {
+        Self {
+            s: Mutex::new(AudioState::default()),
+        }
+    }
+
+    pub fn push(&self, seq: u32, pts_us: u64, data: &[u8]) {
+        let Ok(mut s) = self.s.lock() else {
+            return;
+        };
+        if data.len() > crate::wire::MAX_AUDIO_DATA {
+            return;
+        }
+        let mut owned = Vec::with_capacity(data.len());
+        owned.extend_from_slice(data);
+        s.q.push_back(AudioPacket {
+            seq,
+            pts_us,
+            data: owned,
+        });
+        while s.q.len() > 1 {
+            let oldest = s.q.front().expect("f");
+            let newest = s.q.back().expect("b");
+            if newest.pts_us.saturating_sub(oldest.pts_us) > MAX_AUDIO_AGE_US {
+                s.q.pop_front();
+            } else {
+                break;
+            }
+        }
+        while s.q.len() > 24 {
+            s.q.pop_front();
+        }
+    }
+
+    pub fn pop(&self, out: &mut [u8]) -> Option<(u32, u64, usize)> {
+        let Ok(mut s) = self.s.lock() else {
+            return None;
+        };
+        let pkt = s.q.pop_front()?;
+        let n = pkt.data.len().min(out.len());
+        out[..n].copy_from_slice(&pkt.data[..n]);
+        Some((pkt.seq, pkt.pts_us, n))
+    }
+}
+
+impl Default for AudioQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +185,8 @@ mod tests {
             frame_id: id,
             flags,
             capture_us: id as u64,
+            first_arrival_us: id as u64,
+            completed_us: id as u64 + 100,
             data: vec![id as u8],
             received: Instant::now(),
         }

@@ -1,11 +1,12 @@
 use crate::crypto::{CryptoError, Opener, Sealer, SessionKeys, pair_secret};
-use crate::queue::FrameQueue;
+use crate::queue::{AudioQueue, FrameQueue};
 use crate::reassembly::Reassembler;
-use crate::stats::NetWindow;
+use crate::stats::{ClockSync, NetWindow, PhoneStatsSnap};
 use crate::wire::{
     self, Control, Datagram, Hello, WireError, decode_control, encode_control,
     encode_datagram_body, encode_tcp_frame, encode_welcome,
 };
+use socket2::{Domain, SockAddr, Socket, Type};
 use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -50,8 +51,13 @@ pub struct Session {
     pub control_tx: Sender<Control>,
     pub control_rx: Option<Receiver<Control>>,
     pub frames: Arc<FrameQueue>,
+    pub audio: Arc<AudioQueue>,
     end: Arc<AtomicU8>,
     pub stats_window: Arc<Mutex<NetWindow>>,
+    phone_stats: Arc<Mutex<PhoneStatsSnap>>,
+    clock: Arc<Mutex<ClockSync>>,
+    rotate: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handles: Mutex<Option<Vec<JoinHandle<()>>>>,
     phone_id: [u8; 8],
@@ -93,6 +99,34 @@ impl Session {
         self.control_rx.take()
     }
 
+    pub fn take_rotate_request(&self) -> bool {
+        self.rotate.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn phone_stats(&self) -> PhoneStatsSnap {
+        self.phone_stats.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    pub fn clock_offset_us(&self) -> Option<i64> {
+        self.clock.lock().ok().and_then(|c| c.median_offset_us())
+    }
+
+    pub fn phone_stats_cell(&self) -> Arc<Mutex<PhoneStatsSnap>> {
+        Arc::clone(&self.phone_stats)
+    }
+
+    pub fn clock_cell(&self) -> Arc<Mutex<ClockSync>> {
+        Arc::clone(&self.clock)
+    }
+
+    pub fn paused_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.paused)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
     pub fn join_transport(self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(mut h) = self.handles.lock()
@@ -123,11 +157,30 @@ pub struct Listener {
     port: u16,
 }
 
+fn tune_tos(sock: &Socket) {
+    #[cfg(unix)]
+    {
+        let _ = sock.set_tos(0xB8);
+    }
+}
+
 impl Listener {
     pub fn bind(port: u16, desktop_id: [u8; 8]) -> io::Result<Self> {
-        let addr = format!("0.0.0.0:{port}");
-        let tcp = TcpListener::bind(&addr)?;
-        let udp = UdpSocket::bind(&addr)?;
+        let addr: SocketAddr = format!("0.0.0.0:{port}").parse().expect("addr");
+        let sock_addr = SockAddr::from(addr);
+        let tcp_sock = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+        tcp_sock.set_reuse_address(true)?;
+        tcp_sock.bind(&sock_addr)?;
+        tcp_sock.listen(128)?;
+        tune_tos(&tcp_sock);
+        let tcp: TcpListener = tcp_sock.into();
+
+        let udp_sock = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
+        udp_sock.set_reuse_address(true)?;
+        udp_sock.bind(&sock_addr)?;
+        let _ = udp_sock.set_recv_buffer_size(4 * 1024 * 1024);
+        tune_tos(&udp_sock);
+        let udp: UdpSocket = udp_sock.into();
         udp.set_read_timeout(Some(Duration::from_millis(50)))?;
         Ok(Self {
             tcp,
@@ -161,6 +214,9 @@ impl Listener {
             }
         };
         self.tcp.set_nonblocking(false)?;
+        if let Ok(clone) = stream.try_clone() {
+            tune_tos(&Socket::from(clone));
+        }
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
@@ -186,8 +242,13 @@ impl Listener {
         let stop = Arc::new(AtomicBool::new(false));
         let (auto_tx, auto_rx) = mpsc::channel();
         let frames = Arc::new(FrameQueue::new());
+        let audio = Arc::new(AudioQueue::new());
         let end = Arc::new(AtomicU8::new(END_NONE));
         let stats_window = Arc::new(Mutex::new(NetWindow::new()));
+        let phone_stats = Arc::new(Mutex::new(PhoneStatsSnap::default()));
+        let clock = Arc::new(Mutex::new(ClockSync::default()));
+        let rotate = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
 
         let _ = stream.set_nodelay(true);
         let phone_addr = Arc::new(Mutex::new(None::<SocketAddr>));
@@ -197,12 +258,17 @@ impl Listener {
             let stop = Arc::clone(&stop);
             let tcp_video = TcpVideo {
                 frames: Arc::clone(&frames),
+                audio: Arc::clone(&audio),
                 last_in: Arc::clone(&last_udp),
                 auto_tx: auto_tx.clone(),
                 reasm: Reassembler::new(),
                 last_key_req: Instant::now() - KEYFRAME_MIN,
+                epoch: Instant::now(),
             };
             let end = Arc::clone(&end);
+            let phone_stats = Arc::clone(&phone_stats);
+            let rotate = Arc::clone(&rotate);
+            let paused = Arc::clone(&paused);
             thread::spawn(move || {
                 tcp_loop(
                     stream,
@@ -212,6 +278,9 @@ impl Listener {
                     auto_rx,
                     control_out,
                     tcp_video,
+                    phone_stats,
+                    rotate,
+                    paused,
                     stop,
                     end,
                 )
@@ -222,7 +291,9 @@ impl Listener {
             let udp = udp;
             let phone_addr = Arc::clone(&phone_addr);
             let frames = Arc::clone(&frames);
+            let audio = Arc::clone(&audio);
             let stats = Arc::clone(&stats_window);
+            let clock = Arc::clone(&clock);
             let last_udp = Arc::clone(&last_udp);
             let stop = Arc::clone(&stop);
             let auto_tx = auto_tx;
@@ -234,7 +305,9 @@ impl Listener {
                     phone_addr,
                     last_udp,
                     frames,
+                    audio,
                     stats,
+                    clock,
                     auto_tx,
                     stop,
                 )
@@ -243,9 +316,10 @@ impl Listener {
 
         let watch_h = {
             let last_udp = Arc::clone(&last_udp);
+            let paused = Arc::clone(&paused);
             let stop = Arc::clone(&stop);
             let end = Arc::clone(&end);
-            thread::spawn(move || watch_loop(last_udp, stop, end))
+            thread::spawn(move || watch_loop(last_udp, paused, stop, end))
         };
 
         let stop_tx = stop;
@@ -253,8 +327,13 @@ impl Listener {
             control_tx,
             control_rx: Some(control_rx),
             frames,
+            audio,
             end,
             stats_window,
+            phone_stats,
+            clock,
+            rotate,
+            paused,
             stop: stop_tx,
             handles: Mutex::new(Some(vec![tcp_h, udp_h, watch_h])),
             phone_id: hello.phone_id,
@@ -303,10 +382,12 @@ fn read_sealed_start(stream: &mut TcpStream, keys: &SessionKeys) -> Result<Contr
 
 struct TcpVideo {
     frames: Arc<FrameQueue>,
+    audio: Arc<AudioQueue>,
     last_in: Arc<Mutex<LastUdp>>,
     auto_tx: Sender<Control>,
     reasm: Reassembler,
     last_key_req: Instant,
+    epoch: Instant,
 }
 
 impl TcpVideo {
@@ -336,8 +417,9 @@ impl TcpVideo {
             capture_us: *capture_us,
             data: Cow::Borrowed(data),
         };
+        let arrival_us = self.epoch.elapsed().as_micros() as u64;
         let mut want_key = false;
-        if let Some(cf) = self.reasm.ingest(&dg) {
+        if let Some(cf) = self.reasm.ingest(&dg, arrival_us) {
             want_key = self.frames.push(cf);
         }
         if (want_key || self.reasm.keyframe_wanted()) && self.last_key_req.elapsed() >= KEYFRAME_MIN
@@ -357,6 +439,9 @@ fn tcp_loop(
     auto_in: Receiver<Control>,
     out: Sender<Control>,
     mut video: TcpVideo,
+    phone_stats: Arc<Mutex<PhoneStatsSnap>>,
+    rotate: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     end: Arc<AtomicU8>,
 ) {
@@ -413,13 +498,44 @@ fn tcp_loop(
                 && let Ok(msg) = decode_control(&pt)
             {
                 video.touch();
-                if matches!(msg, Control::VideoChunk { .. }) {
-                    video.ingest(&msg);
-                } else {
-                    if matches!(msg, Control::Bye) {
-                        set_end(&end, END_BYE);
+                match &msg {
+                    Control::VideoChunk { .. } => video.ingest(&msg),
+                    Control::AudioChunk { seq, pts_us, data } => {
+                        video.audio.push(*seq, *pts_us, data);
                     }
-                    let _ = out.send(msg);
+                    Control::PhoneStats {
+                        enc_avg_us,
+                        enc_max_us,
+                        fps,
+                        bitrate,
+                    } => {
+                        if let Ok(mut g) = phone_stats.lock() {
+                            *g = PhoneStatsSnap {
+                                enc_avg_us: *enc_avg_us,
+                                enc_max_us: *enc_max_us,
+                                fps: *fps,
+                                bitrate: *bitrate,
+                            };
+                        }
+                        video.touch();
+                    }
+                    Control::Paused { on } => {
+                        paused.store(*on != 0, Ordering::Relaxed);
+                        let _ = out.send(msg);
+                    }
+                    Control::RotateView => {
+                        rotate.store(true, Ordering::Relaxed);
+                    }
+                    Control::PresetRequest { .. } | Control::AudioState { .. } => {
+                        let _ = out.send(msg);
+                    }
+                    Control::Bye => {
+                        set_end(&end, END_BYE);
+                        let _ = out.send(msg);
+                    }
+                    _ => {
+                        let _ = out.send(msg);
+                    }
                 }
             }
             pending.drain(..2 + len);
@@ -445,7 +561,9 @@ fn udp_loop(
     phone_addr: Arc<Mutex<Option<SocketAddr>>>,
     last_udp: Arc<Mutex<LastUdp>>,
     frames: Arc<FrameQueue>,
+    audio: Arc<AudioQueue>,
     stats: Arc<Mutex<NetWindow>>,
+    clock: Arc<Mutex<ClockSync>>,
     auto_tx: Sender<Control>,
     stop: Arc<AtomicBool>,
 ) {
@@ -508,7 +626,7 @@ fn udp_loop(
                         }
                         let prev_drops = reasm.stats().frames_dropped;
                         let prev_ok = reasm.stats().frames_ok;
-                        if let Some(cf) = reasm.ingest(&dg) {
+                        if let Some(cf) = reasm.ingest(&dg, arrival_us) {
                             if reasm.stats().frames_ok > prev_ok
                                 && let Ok(mut nw) = stats.lock()
                             {
@@ -529,7 +647,7 @@ fn udp_loop(
                         }
                         let _ = data;
                     }
-                    Datagram::Pong { id, t_us } => {
+                    Datagram::Pong { id, t_us, phone_us } => {
                         let now_us = epoch.elapsed().as_micros() as u64;
                         if now_us >= t_us {
                             let rtt = Duration::from_micros(now_us - t_us);
@@ -537,7 +655,18 @@ fn udp_loop(
                                 nw.note_ping_rtt(rtt);
                             }
                         }
+                        if let (Some(pu), Ok(mut cl)) = (phone_us, clock.lock()) {
+                            cl.note_pong(t_us, pu, now_us);
+                        }
                         let _ = id;
+                    }
+                    Datagram::Audio {
+                        seq,
+                        pts_us,
+                        ref data,
+                        ..
+                    } => {
+                        audio.push(seq, pts_us, data);
                     }
                     Datagram::Keepalive | Datagram::Ping { .. } => {}
                 }
@@ -593,10 +722,19 @@ fn send_udp(
     udp.send_to(&wire, addr).map(|_| ()).map_err(|_| ())
 }
 
-fn watch_loop(last_udp: Arc<Mutex<LastUdp>>, stop: Arc<AtomicBool>, end: Arc<AtomicU8>) {
+fn watch_loop(
+    last_udp: Arc<Mutex<LastUdp>>,
+    paused: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    end: Arc<AtomicU8>,
+) {
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
+        }
+        if paused.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(100));
+            continue;
         }
         let silent = last_udp
             .lock()
@@ -790,7 +928,16 @@ mod tests {
             }
         };
         thread::sleep(Duration::from_millis(5));
-        send_phone(&udp, &dest, &mut useal, &Datagram::Pong { id, t_us });
+        send_phone(
+            &udp,
+            &dest,
+            &mut useal,
+            &Datagram::Pong {
+                id,
+                t_us,
+                phone_us: None,
+            },
+        );
         thread::sleep(Duration::from_millis(300));
         assert!(session.stats_window.lock().expect("st").rtt_ms() >= 5.0);
         assert!(kf_h.join().expect("kf"));

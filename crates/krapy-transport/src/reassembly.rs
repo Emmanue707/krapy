@@ -9,6 +9,8 @@ pub struct CompleteFrame {
     pub frame_id: u32,
     pub flags: u8,
     pub capture_us: u64,
+    pub first_arrival_us: u64,
+    pub completed_us: u64,
     pub data: Vec<u8>,
     pub received: Instant,
 }
@@ -26,6 +28,7 @@ struct Partial {
     count: u16,
     flags: u8,
     capture_us: u64,
+    first_arrival_us: u64,
     parts: Vec<Option<Vec<u8>>>,
     received: u16,
 }
@@ -61,7 +64,7 @@ impl Reassembler {
         self.need_keyframe = false;
     }
 
-    pub fn ingest(&mut self, dg: &Datagram<'_>) -> Option<CompleteFrame> {
+    pub fn ingest(&mut self, dg: &Datagram<'_>, arrival_us: u64) -> Option<CompleteFrame> {
         let Datagram::Video {
             frame_id,
             idx,
@@ -107,6 +110,7 @@ impl Reassembler {
                 count: *count,
                 flags: *flags,
                 capture_us: *capture_us,
+                first_arrival_us: arrival_us,
                 parts: vec![None; *count as usize],
                 received: 0,
             });
@@ -179,6 +183,8 @@ impl Reassembler {
             frame_id: done.frame_id,
             flags: done.flags,
             capture_us: done.capture_us,
+            first_arrival_us: done.first_arrival_us,
+            completed_us: arrival_us,
             data,
             received: Instant::now(),
         })
@@ -210,8 +216,10 @@ mod tests {
     #[test]
     fn in_order() {
         let mut r = Reassembler::new();
-        assert!(r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a")).is_none());
-        let f = r.ingest(&frag(1, 1, 2, FLAG_KEYFRAME, b"b")).expect("done");
+        assert!(r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a"), 0).is_none());
+        let f = r
+            .ingest(&frag(1, 1, 2, FLAG_KEYFRAME, b"b"), 0)
+            .expect("done");
         assert_eq!(f.data, b"ab");
         assert_eq!(r.stats().frames_ok, 1);
     }
@@ -219,53 +227,55 @@ mod tests {
     #[test]
     fn out_of_order() {
         let mut r = Reassembler::new();
-        assert!(r.ingest(&frag(1, 1, 2, FLAG_KEYFRAME, b"b")).is_none());
-        let f = r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a")).expect("done");
+        assert!(r.ingest(&frag(1, 1, 2, FLAG_KEYFRAME, b"b"), 0).is_none());
+        let f = r
+            .ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a"), 0)
+            .expect("done");
         assert_eq!(f.data, b"ab");
     }
 
     #[test]
     fn loss_need_keyframe() {
         let mut r = Reassembler::new();
-        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"));
-        let _ = r.ingest(&frag(2, 0, 2, 0, b"x"));
-        let _ = r.ingest(&frag(2, 1, 2, 0, b"y"));
+        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"), 0);
+        let _ = r.ingest(&frag(2, 0, 2, 0, b"x"), 0);
+        let _ = r.ingest(&frag(2, 1, 2, 0, b"y"), 0);
         assert!(r.keyframe_wanted());
-        assert!(r.ingest(&frag(3, 0, 1, FLAG_KEYFRAME, b"k")).is_some());
+        assert!(r.ingest(&frag(3, 0, 1, FLAG_KEYFRAME, b"k"), 0).is_some());
         assert!(!r.keyframe_wanted());
     }
 
     #[test]
     fn duplicate_fragment() {
         let mut r = Reassembler::new();
-        assert!(r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a")).is_none());
-        assert!(r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a")).is_none());
-        let f = r.ingest(&frag(1, 1, 2, FLAG_KEYFRAME, b"b")).expect("d");
+        assert!(r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a"), 0).is_none());
+        assert!(r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"a"), 0).is_none());
+        let f = r.ingest(&frag(1, 1, 2, FLAG_KEYFRAME, b"b"), 0).expect("d");
         assert_eq!(f.data, b"ab");
     }
 
     #[test]
     fn stale_fragment() {
         let mut r = Reassembler::new();
-        let _ = r.ingest(&frag(1, 0, 1, FLAG_KEYFRAME, b"a"));
-        assert!(r.ingest(&frag(0, 0, 1, FLAG_KEYFRAME, b"z")).is_none());
+        let _ = r.ingest(&frag(1, 0, 1, FLAG_KEYFRAME, b"a"), 0);
+        assert!(r.ingest(&frag(0, 0, 1, FLAG_KEYFRAME, b"z"), 0).is_none());
     }
 
     #[test]
     fn lost_keyframe_needs_another() {
         let mut r = Reassembler::new();
-        let _ = r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"k"));
-        assert!(r.ingest(&frag(2, 0, 1, 0, b"p")).is_none());
+        let _ = r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"k"), 0);
+        assert!(r.ingest(&frag(2, 0, 1, 0, b"p"), 0).is_none());
         assert!(r.keyframe_wanted());
     }
 
     #[test]
     fn config_passes_while_waiting_for_keyframe() {
         let mut r = Reassembler::new();
-        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"));
-        let _ = r.ingest(&frag(2, 0, 1, 0, b"b"));
+        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"), 0);
+        let _ = r.ingest(&frag(2, 0, 1, 0, b"b"), 0);
         assert!(r.keyframe_wanted());
-        let c = r.ingest(&frag(3, 0, 1, FLAG_CODEC_CONFIG, b"sps"));
+        let c = r.ingest(&frag(3, 0, 1, FLAG_CODEC_CONFIG, b"sps"), 0);
         assert_eq!(c.expect("config").data, b"sps");
         assert!(r.keyframe_wanted());
     }

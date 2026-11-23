@@ -1,5 +1,42 @@
 use krapy_core::adaptive::NetStats;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhoneStatsSnap {
+    pub enc_avg_us: u32,
+    pub enc_max_us: u32,
+    pub fps: u8,
+    pub bitrate: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct ClockSync {
+    samples: VecDeque<i64>,
+}
+
+impl ClockSync {
+    pub fn note_pong(&mut self, t_send_us: u64, phone_us: u64, now_us: u64) {
+        if now_us < t_send_us {
+            return;
+        }
+        let rtt = now_us - t_send_us;
+        let offset = phone_us as i64 - (t_send_us as i64 + rtt as i64 / 2);
+        if self.samples.len() >= 16 {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(offset);
+    }
+
+    pub fn median_offset_us(&self) -> Option<i64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut v: Vec<i64> = self.samples.iter().copied().collect();
+        v.sort_unstable();
+        Some(v[v.len() / 2])
+    }
+}
 
 const WINDOW: Duration = Duration::from_millis(500);
 const EWMA_ALPHA: f32 = 0.125;
@@ -144,9 +181,9 @@ mod tests {
         w.window_start = Some(Instant::now());
 
         let prev = r.stats().frames_dropped;
-        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"));
-        let _ = r.ingest(&frag(2, 0, 2, 0, b"x"));
-        let _ = r.ingest(&frag(2, 1, 2, 0, b"y"));
+        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"), 1000);
+        let _ = r.ingest(&frag(2, 0, 2, 0, b"x"), 2000);
+        let _ = r.ingest(&frag(2, 1, 2, 0, b"y"), 2100);
         let new = r.stats().frames_dropped;
         for _ in 0..(new - prev) {
             w.note_frame_dropped();
