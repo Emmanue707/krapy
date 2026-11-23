@@ -64,6 +64,33 @@ pub enum Control {
         capture_us: u64,
         data: Vec<u8>,
     },
+    AudioChunk {
+        seq: u32,
+        pts_us: u64,
+        data: Vec<u8>,
+    },
+    PhoneStats {
+        enc_avg_us: u32,
+        enc_max_us: u32,
+        fps: u8,
+        bitrate: u32,
+    },
+    DesktopStats {
+        fps: u8,
+        latency_ms: u16,
+        decode_ms: u16,
+        loss_permille: u16,
+    },
+    PresetRequest {
+        preset: u8,
+    },
+    Paused {
+        on: u8,
+    },
+    RotateView,
+    AudioState {
+        on: u8,
+    },
     Bye,
 }
 
@@ -84,6 +111,12 @@ pub enum Datagram<'a> {
     Pong {
         id: u32,
         t_us: u64,
+        phone_us: Option<u64>,
+    },
+    Audio {
+        seq: u32,
+        pts_us: u64,
+        data: Cow<'a, [u8]>,
     },
     Keepalive,
 }
@@ -92,6 +125,8 @@ pub const DG_VIDEO: u8 = 0x01;
 pub const DG_PING: u8 = 0x02;
 pub const DG_PONG: u8 = 0x03;
 pub const DG_KEEPALIVE: u8 = 0x05;
+pub const DG_AUDIO: u8 = 0x06;
+pub const MAX_AUDIO_DATA: usize = 960;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireError {
@@ -277,6 +312,52 @@ pub fn encode_control(c: &Control) -> Result<Vec<u8>, WireError> {
             out.extend_from_slice(&capture_us.to_be_bytes());
             out.extend_from_slice(data);
         }
+        Control::AudioChunk { seq, pts_us, data } => {
+            if data.len() > MAX_AUDIO_DATA {
+                return Err(WireError::BadLength);
+            }
+            out.push(0x31);
+            out.extend_from_slice(&seq.to_be_bytes());
+            out.extend_from_slice(&pts_us.to_be_bytes());
+            out.extend_from_slice(data);
+        }
+        Control::PhoneStats {
+            enc_avg_us,
+            enc_max_us,
+            fps,
+            bitrate,
+        } => {
+            out.push(0x40);
+            out.extend_from_slice(&enc_avg_us.to_be_bytes());
+            out.extend_from_slice(&enc_max_us.to_be_bytes());
+            out.push(*fps);
+            out.extend_from_slice(&bitrate.to_be_bytes());
+        }
+        Control::DesktopStats {
+            fps,
+            latency_ms,
+            decode_ms,
+            loss_permille,
+        } => {
+            out.push(0x41);
+            out.push(*fps);
+            out.extend_from_slice(&latency_ms.to_be_bytes());
+            out.extend_from_slice(&decode_ms.to_be_bytes());
+            out.extend_from_slice(&loss_permille.to_be_bytes());
+        }
+        Control::PresetRequest { preset } => {
+            out.push(0x42);
+            out.push(*preset);
+        }
+        Control::Paused { on } => {
+            out.push(0x43);
+            out.push(*on);
+        }
+        Control::RotateView => out.push(0x45),
+        Control::AudioState { on } => {
+            out.push(0x46);
+            out.push(*on);
+        }
         Control::Bye => out.push(0x7f),
     }
     Ok(out)
@@ -365,6 +446,61 @@ pub fn decode_control(buf: &[u8]) -> Result<Control, WireError> {
                 data: buf[hdr..].to_vec(),
             })
         }
+        0x31 => {
+            let hdr = 1 + 4 + 8;
+            if buf.len() < hdr {
+                return Err(WireError::Truncated);
+            }
+            if buf.len() - hdr > MAX_AUDIO_DATA {
+                return Err(WireError::BadLength);
+            }
+            Ok(Control::AudioChunk {
+                seq: u32::from_be_bytes(buf[1..5].try_into().expect("len")),
+                pts_us: u64::from_be_bytes(buf[5..13].try_into().expect("len")),
+                data: buf[hdr..].to_vec(),
+            })
+        }
+        0x40 => {
+            if buf.len() < 1 + 4 + 4 + 1 + 4 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::PhoneStats {
+                enc_avg_us: u32::from_be_bytes(buf[1..5].try_into().expect("len")),
+                enc_max_us: u32::from_be_bytes(buf[5..9].try_into().expect("len")),
+                fps: buf[9],
+                bitrate: u32::from_be_bytes(buf[10..14].try_into().expect("len")),
+            })
+        }
+        0x41 => {
+            if buf.len() < 1 + 1 + 2 + 2 + 2 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::DesktopStats {
+                fps: buf[1],
+                latency_ms: u16::from_be_bytes(buf[2..4].try_into().expect("len")),
+                decode_ms: u16::from_be_bytes(buf[4..6].try_into().expect("len")),
+                loss_permille: u16::from_be_bytes(buf[6..8].try_into().expect("len")),
+            })
+        }
+        0x42 => {
+            if buf.len() < 2 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::PresetRequest { preset: buf[1] })
+        }
+        0x43 => {
+            if buf.len() < 2 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::Paused { on: buf[1] })
+        }
+        0x45 => Ok(Control::RotateView),
+        0x46 => {
+            if buf.len() < 2 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::AudioState { on: buf[1] })
+        }
         0x7f => Ok(Control::Bye),
         _ => Err(WireError::UnknownType),
     }
@@ -397,10 +533,22 @@ pub fn encode_datagram_body(d: &Datagram<'_>) -> Result<Vec<u8>, WireError> {
             out.extend_from_slice(&id.to_be_bytes());
             out.extend_from_slice(&t_us.to_be_bytes());
         }
-        Datagram::Pong { id, t_us } => {
+        Datagram::Pong { id, t_us, phone_us } => {
             out.push(DG_PONG);
             out.extend_from_slice(&id.to_be_bytes());
             out.extend_from_slice(&t_us.to_be_bytes());
+            if let Some(pu) = phone_us {
+                out.extend_from_slice(&pu.to_be_bytes());
+            }
+        }
+        Datagram::Audio { seq, pts_us, data } => {
+            if data.len() > MAX_AUDIO_DATA {
+                return Err(WireError::BadLength);
+            }
+            out.push(DG_AUDIO);
+            out.extend_from_slice(&seq.to_be_bytes());
+            out.extend_from_slice(&pts_us.to_be_bytes());
+            out.extend_from_slice(data);
         }
         Datagram::Keepalive => out.push(DG_KEEPALIVE),
     }
@@ -443,9 +591,30 @@ pub fn decode_datagram_body(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
             if buf.len() < 1 + 12 {
                 return Err(WireError::Truncated);
             }
+            let phone_us = if buf.len() > 20 {
+                Some(u64::from_be_bytes(buf[13..21].try_into().expect("len")))
+            } else {
+                None
+            };
             Ok(Datagram::Pong {
                 id: u32::from_be_bytes(buf[1..5].try_into().expect("len")),
                 t_us: u64::from_be_bytes(buf[5..13].try_into().expect("len")),
+                phone_us,
+            })
+        }
+        DG_AUDIO => {
+            let hdr = 1 + 4 + 8;
+            if buf.len() < hdr {
+                return Err(WireError::Truncated);
+            }
+            let data_len = buf.len() - hdr;
+            if data_len > MAX_AUDIO_DATA {
+                return Err(WireError::BadLength);
+            }
+            Ok(Datagram::Audio {
+                seq: u32::from_be_bytes(buf[1..5].try_into().expect("len")),
+                pts_us: u64::from_be_bytes(buf[5..13].try_into().expect("len")),
+                data: Cow::Borrowed(&buf[13..]),
             })
         }
         DG_KEEPALIVE => {
@@ -554,6 +723,27 @@ mod tests {
                 capture_us: 123_456,
                 data: vec![0, 0, 0, 1, 0x65],
             },
+            Control::AudioChunk {
+                seq: 1,
+                pts_us: 50_000,
+                data: vec![0; 960],
+            },
+            Control::PhoneStats {
+                enc_avg_us: 5000,
+                enc_max_us: 12000,
+                fps: 60,
+                bitrate: 8_000_000,
+            },
+            Control::DesktopStats {
+                fps: 60,
+                latency_ms: 14,
+                decode_ms: 3,
+                loss_permille: 5,
+            },
+            Control::PresetRequest { preset: 1 },
+            Control::Paused { on: 1 },
+            Control::RotateView,
+            Control::AudioState { on: 0 },
             Control::Bye,
         ];
         for m in msgs {
@@ -582,9 +772,30 @@ mod tests {
         let p = Datagram::Ping { id: 1, t_us: 99 };
         let enc = encode_datagram_body(&p).expect("enc");
         assert_eq!(decode_datagram_body(&enc).expect("d"), p);
-        let pong = Datagram::Pong { id: 1, t_us: 99 };
+        let pong = Datagram::Pong {
+            id: 1,
+            t_us: 99,
+            phone_us: None,
+        };
         let enc = encode_datagram_body(&pong).expect("enc");
         assert_eq!(decode_datagram_body(&enc).expect("d"), pong);
+        let pong2 = Datagram::Pong {
+            id: 2,
+            t_us: 100,
+            phone_us: Some(9_999_999),
+        };
+        let enc2 = encode_datagram_body(&pong2).expect("enc");
+        assert_eq!(decode_datagram_body(&enc2).expect("d"), pong2);
+        let aud = Datagram::Audio {
+            seq: 3,
+            pts_us: 1,
+            data: Cow::Borrowed(&[1, 2]),
+        };
+        let enca = encode_datagram_body(&aud).expect("enc");
+        match decode_datagram_body(&enca).expect("d") {
+            Datagram::Audio { data, .. } => assert_eq!(&data[..], &[1, 2]),
+            _ => panic!("typ"),
+        }
         let k = Datagram::Keepalive;
         let enc = encode_datagram_body(&k).expect("enc");
         assert_eq!(decode_datagram_body(&enc).expect("d"), k);

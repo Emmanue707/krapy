@@ -8,12 +8,14 @@ object Wire {
     const val DG_PING: Int = 0x02
     const val DG_PONG: Int = 0x03
     const val DG_KEEPALIVE: Int = 0x05
+    const val DG_AUDIO: Int = 0x06
 
     const val VIDEO_FLAG_KEYFRAME: Int = 1 shl 0
     const val VIDEO_FLAG_CODEC_CONFIG: Int = 1 shl 1
 
     const val MAX_VIDEO_DATA: Int = 1100
     const val MAX_TCP_VIDEO: Int = 32 * 1024
+    const val MAX_AUDIO_DATA: Int = 960
 
     fun encodeTcpFrame(body: ByteArray): ByteArray {
         val out = ByteArray(2 + body.size)
@@ -84,6 +86,12 @@ object Wire {
         data class Touch(val action: Int, val pointer: Int, val x: Int, val y: Int) : Control()
         data class Key(val code: Int) : Control()
         data class Text(val text: String) : Control()
+        data class DesktopStats(
+            val fps: Int,
+            val latencyMs: Int,
+            val decodeMs: Int,
+            val lossPermille: Int,
+        ) : Control()
         data object Bye : Control()
     }
 
@@ -182,9 +190,76 @@ object Wire {
             }
 
             0x22 -> Control.Text(String(buf, 1, buf.size - 1, Charsets.UTF_8))
+            0x41 -> {
+                if (buf.size < 8) throw WireException("truncated desktop stats")
+                Control.DesktopStats(
+                    fps = buf[1].toInt() and 0xff,
+                    latencyMs = u16(buf, 2),
+                    decodeMs = u16(buf, 4),
+                    lossPermille = u16(buf, 6),
+                )
+            }
             0x7f -> Control.Bye
             else -> throw WireException("unknown control ${buf[0]}")
         }
+    }
+
+    fun decodePhoneStats(buf: ByteArray): List<Int> {
+        if (buf.size < 14) throw WireException("truncated phone stats")
+        return listOf(
+            u32(buf, 1),
+            u32(buf, 5),
+            buf[9].toInt() and 0xff,
+            u32(buf, 10),
+        )
+    }
+
+    fun encodePhoneStats(encAvgUs: Int, encMaxUs: Int, fps: Int, bitrate: Int): ByteArray {
+        val out = ByteArray(14)
+        out[0] = 0x40
+        putU32(out, 1, encAvgUs)
+        putU32(out, 5, encMaxUs)
+        out[9] = fps.toByte()
+        putU32(out, 10, bitrate)
+        return out
+    }
+
+    fun encodePreset(id: Int): ByteArray = byteArrayOf(0x42, id.toByte())
+
+    fun encodePaused(on: Boolean): ByteArray = byteArrayOf(0x43, if (on) 1 else 0)
+
+    fun encodeRotate(): ByteArray = byteArrayOf(0x45)
+
+    fun encodeAudioState(on: Boolean): ByteArray = byteArrayOf(0x46, if (on) 1 else 0)
+
+    fun encodeDesktopStats(fps: Int, latencyMs: Int, decodeMs: Int, lossPermille: Int): ByteArray {
+        val out = ByteArray(8)
+        out[0] = 0x41
+        out[1] = fps.toByte()
+        putU16(out, 2, latencyMs)
+        putU16(out, 4, decodeMs)
+        putU16(out, 6, lossPermille)
+        return out
+    }
+
+    fun encodeAudioChunk(seq: Int, ptsUs: Long, data: ByteArray, off: Int, len: Int): ByteArray {
+        require(len <= MAX_AUDIO_DATA)
+        val b = ByteBuffer.allocate(13 + len).order(ByteOrder.BIG_ENDIAN)
+        b.put(0x31.toByte())
+        b.putInt(seq)
+        b.putLong(ptsUs)
+        b.put(data, off, len)
+        return b.array()
+    }
+
+    fun encodeAudioDatagram(seq: Int, ptsUs: Long, data: ByteArray, off: Int, len: Int): ByteArray {
+        require(len <= MAX_AUDIO_DATA)
+        val out = ByteArray(13 + len)
+        out[0] = DG_AUDIO.toByte()
+        putU32(out, 1, seq)
+        putU64(out, 5, ptsUs)
+        System.arraycopy(data, off, out, 13, len)
+        return out
     }
 
     fun encodeDatagramBody(
@@ -197,6 +272,7 @@ object Wire {
         data: ByteArray = ByteArray(0),
         pingId: Int = 0,
         pingT: Long = 0,
+        phoneUs: Long = 0,
     ): ByteArray = when (type) {
         DG_VIDEO -> {
             val out = ByteArray(18 + data.size)
@@ -211,10 +287,11 @@ object Wire {
         }
 
         DG_PONG -> {
-            val out = ByteArray(13)
+            val out = if (phoneUs != 0L) ByteArray(21) else ByteArray(13)
             out[0] = type.toByte()
             putU32(out, 1, pingId)
             putU64(out, 5, pingT)
+            if (phoneUs != 0L) putU64(out, 13, phoneUs)
             out
         }
 

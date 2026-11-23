@@ -86,6 +86,13 @@ highest seen.
 | 0x21 | d->p | Key | code u8 (1 back, 2 home, 3 recents, 4 power) |
 | 0x22 | d->p | Text | utf8 |
 | 0x30 | p->d | VideoChunk | same body as the UDP Video datagram, data up to 32 KiB |
+| 0x31 | p->d | AudioChunk | seq u32, pts_us u64, PCM s16le stereo 48 kHz (max 960 bytes) |
+| 0x40 | p->d | PhoneStats | enc_avg_us u32, enc_max_us u32, fps u8, bitrate u32 |
+| 0x41 | d->p | DesktopStats | fps u8, latency_ms u16, decode_ms u16, loss_permille u16 |
+| 0x42 | p->d | PresetRequest | preset u8 (0 smooth, 1 balanced, 2 sharp) |
+| 0x43 | p->d | Paused | on u8 |
+| 0x45 | p->d | RotateView | - |
+| 0x46 | p->d | AudioState | on u8 |
 | 0x7f | both | Bye | - |
 
 ## UDP datagrams (plaintext after opening)
@@ -94,8 +101,9 @@ highest seen.
 |------|-----|------|------|
 | 0x01 | p->d | Video | frame_id u32, idx u16, count u16, flags u8, capture_us u64, data |
 | 0x02 | d->p | Ping | id u32, t_us u64 |
-| 0x03 | p->d | Pong | id u32, t_us u64 (echoed) |
+| 0x03 | p->d | Pong | id u32, t_us u64 (echoed), phone_us u64 optional (phone monotonic us) |
 | 0x05 | p->d | Keepalive | - |
+| 0x06 | p->d | Audio | seq u32, pts_us u64, PCM payload (max 960 bytes) |
 
 Video flags: bit 0 keyframe, bit 1 codec config (SPS/PPS). `data` is at most
 1100 bytes so a sealed datagram stays under 1200 bytes. A frame is the
@@ -119,7 +127,7 @@ Incomplete older frames are dropped. Complete frames are decoded in order;
 if three or more pile up the desktop drops them and waits for a keyframe
 instead of falling behind. Codec config is never dropped. After a loss or a
 decode error the decoder waits for the next keyframe and the desktop sends
-`Keyframe` (at most every 300 ms). The phone encodes a keyframe every second.
+`Keyframe` (at most every 300 ms). Periodic IDRs use a longer interval; the desktop requests keyframes after loss or decode errors.
 
 ## Liveness
 
