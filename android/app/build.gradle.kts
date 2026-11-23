@@ -124,3 +124,23 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
 }
+
+// fetch the robolectric android jar through gradle instead of at test time
+val robolectricJars: Configuration by configurations.creating { isTransitive = false }
+
+dependencies {
+    robolectricJars("org.robolectric:android-all-instrumented:15-robolectric-12650502-i7")
+}
+
+val robolectricDir = layout.buildDirectory.dir("robolectric-deps")
+
+val robolectricDeps by tasks.registering(Copy::class) {
+    from(robolectricJars)
+    into(robolectricDir)
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(robolectricDeps)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricDir.get().asFile.absolutePath)
+}

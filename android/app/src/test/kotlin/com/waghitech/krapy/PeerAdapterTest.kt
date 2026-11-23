@@ -11,7 +11,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class PeerAdapterTest {
     private fun peer(name: String, host: String) =
         Peer("f72cd30ccd34ad93", name, ByteArray(32), host, 27183, 0L)
