@@ -3,6 +3,7 @@ package com.waghitech.krapy
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.method.ScrollingMovementMethod
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -139,6 +141,7 @@ class MainActivity : Activity() {
         refreshList()
         handlePairIntent(intent)
         maybeRequestNotif()
+        maybeShowLastCrash()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -185,20 +188,25 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_SCAN && resultCode == RESULT_OK) {
-            val uri = data?.getStringExtra("uri")
-            if (uri != null) pairUri(uri) else Toast.makeText(this, "no uri", Toast.LENGTH_SHORT).show()
-        }
-        if (requestCode == REQ_CAPTURE) {
-            val peer = pendingPeer
-            pendingPeer = null
-            if (peer == null) return
-            if (resultCode != RESULT_OK || data == null) {
-                Toast.makeText(this, "capture denied", Toast.LENGTH_SHORT).show()
-                return
+        try {
+            if (requestCode == REQ_SCAN && resultCode == RESULT_OK) {
+                val uri = data?.getStringExtra("uri")
+                if (uri != null) pairUri(uri) else Toast.makeText(this, "no uri", Toast.LENGTH_SHORT).show()
             }
-            MirrorService.start(this, peer.id, resultCode, data)
-            refreshStatus()
+            if (requestCode == REQ_CAPTURE) {
+                val peer = pendingPeer
+                pendingPeer = null
+                if (peer == null) return
+                if (resultCode != RESULT_OK || data == null) {
+                    Toast.makeText(this, "capture denied", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                MirrorService.start(this, peer.id, resultCode, data)
+                refreshStatus()
+            }
+        } catch (t: Throwable) {
+            CrashLog.record(this, t, "onActivityResult")
+            Toast.makeText(this, t.message ?: "capture failed", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -244,6 +252,9 @@ class MainActivity : Activity() {
             startMirroring(peer)
         } catch (e: PairingException) {
             Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
+        } catch (t: Throwable) {
+            CrashLog.record(this, t, "pairUri")
+            Toast.makeText(this, t.message ?: "pair failed", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -331,20 +342,60 @@ class MainActivity : Activity() {
     }
 
     private fun startMirroring(peer: Peer) {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            pendingPeer = peer
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
-            return
+        try {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                pendingPeer = peer
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+                return
+            }
+            beginCapture(peer)
+        } catch (t: Throwable) {
+            CrashLog.record(this, t, "startMirroring")
+            Toast.makeText(this, t.message ?: "mirror failed", Toast.LENGTH_LONG).show()
         }
-        beginCapture(peer)
     }
 
     private fun beginCapture(peer: Peer) {
-        pendingPeer = peer
-        val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
+        try {
+            pendingPeer = peer
+            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
+        } catch (t: Throwable) {
+            CrashLog.record(this, t, "beginCapture")
+            Toast.makeText(this, t.message ?: "capture failed", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun maybeShowLastCrash() {
+        val text = CrashLog.readFile(this) ?: return
+        val scroll = TextView(this).apply {
+            this.text = text
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            setTextIsSelectable(true)
+            movementMethod = ScrollingMovementMethod()
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            maxHeight = dp(280)
+        }
+        val wrap = android.widget.ScrollView(this).apply {
+            addView(scroll)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("krapy crashed last time")
+            .setView(wrap)
+            .setPositiveButton("Copy") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("krapy crash", text))
+                Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show()
+                CrashLog.deleteFile(this)
+            }
+            .setNegativeButton("Dismiss") { _, _ ->
+                CrashLog.deleteFile(this)
+            }
+            .setCancelable(false)
+            .show()
     }
 
     private fun confirmForget(peer: Peer) {
