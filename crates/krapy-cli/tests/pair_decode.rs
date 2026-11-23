@@ -126,7 +126,7 @@ fn fake_phone_pair_decode_no_window() -> anyhow::Result<()> {
 
     let mut annexb = None;
     for _ in 0..100 {
-        if let Some(f) = session.frames.take() {
+        if let Some(f) = session.frames.pop() {
             annexb = Some(f.data);
             break;
         }

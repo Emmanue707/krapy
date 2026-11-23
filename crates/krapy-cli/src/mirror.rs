@@ -11,10 +11,12 @@ use krapy_core::device::{PairedDevice, Store};
 use krapy_core::preset::{Preset, Quality};
 use krapy_decode::{Decoder, open};
 use krapy_render::FrameSource;
-use krapy_transport::{AcceptMode, CompleteFrame, Control, Listener, Session, SessionError};
+use krapy_transport::{AcceptMode, Control, FrameQueue, Listener, Session, SessionError};
 
 const PAIR_WINDOW: Duration = Duration::from_secs(300);
-const POLL: Duration = Duration::from_millis(5);
+const POLL: Duration = Duration::from_millis(1);
+const NET_TICK: Duration = Duration::from_millis(20);
+const KEY_RETRY: Duration = Duration::from_millis(300);
 const SMALL_STACK: usize = 256 * 1024;
 
 type ControlSlot = Arc<Mutex<Option<Sender<Control>>>>;
@@ -28,6 +30,7 @@ pub struct MirrorOpts {
     pub fps: Option<u8>,
     pub stats: bool,
     pub no_window: bool,
+    pub verbose: bool,
 }
 
 impl MirrorOpts {
@@ -72,34 +75,15 @@ pub fn lookup_secrets(store: &Store) -> Vec<(String, [u8; 32])> {
         .collect()
 }
 
-struct LatestSlot<T> {
-    inner: Mutex<Option<T>>,
-}
-
-impl<T> LatestSlot<T> {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(None),
-        }
-    }
-
-    fn put(&self, value: T) {
-        if let Ok(mut g) = self.inner.lock() {
-            *g = Some(value);
-        }
-    }
-
-    fn take(&self) -> Option<T> {
-        self.inner.lock().ok().and_then(|mut g| g.take())
-    }
-}
-
 struct Counters {
     frames_in: AtomicU64,
     frames_out: AtomicU64,
     decode_us: AtomicU64,
     decode_samples: AtomicU64,
     bitrate: AtomicU64,
+    lat_us: AtomicU64,
+    lat_samples: AtomicU64,
+    lat_max_us: AtomicU64,
 }
 
 impl Counters {
@@ -110,6 +94,9 @@ impl Counters {
             decode_us: AtomicU64::new(0),
             decode_samples: AtomicU64::new(0),
             bitrate: AtomicU64::new(0),
+            lat_us: AtomicU64::new(0),
+            lat_samples: AtomicU64::new(0),
+            lat_max_us: AtomicU64::new(0),
         }
     }
 }
@@ -131,11 +118,11 @@ pub fn run_connect_loop(
         if let Ok(mut g) = control_slot.lock() {
             *g = Some(session.control_tx.clone());
         }
-        drive_session(session, source.clone(), &opts)?;
+        let why = drive_session(session, source.clone(), &opts)?;
         if let Ok(mut g) = control_slot.lock() {
             *g = None;
         }
-        println!("session ended — waiting for phone to reconnect");
+        println!("session ended ({why}), waiting for the phone to reconnect");
     }
 }
 
@@ -192,11 +179,11 @@ pub fn run_pair_then_connect(
         *g = Some(session.control_tx.clone());
     }
     let name = session.phone_name().to_string();
-    drive_session(session, source.clone(), &opts)?;
+    let why = drive_session(session, source.clone(), &opts)?;
     if let Ok(mut g) = control_slot.lock() {
         *g = None;
     }
-    println!("paired with {name} — waiting for phone to reconnect");
+    println!("paired with {name}; session ended ({why}), waiting for the phone to reconnect");
     run_connect_loop(listener, store, source, control_slot, opts)
 }
 
@@ -216,9 +203,12 @@ fn accept_known(listener: &Listener, map: &[(String, [u8; 32])]) -> Result<Sessi
     })
 }
 
-fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -> Result<()> {
+fn drive_session(
+    mut session: Session,
+    source: FrameSource,
+    opts: &MirrorOpts,
+) -> Result<&'static str> {
     let ceiling = opts.ceiling();
-    let annexb = Arc::new(LatestSlot::<CompleteFrame>::new());
     let counters = Arc::new(Counters::new());
     counters
         .bitrate
@@ -233,8 +223,6 @@ fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -
     let stop = session.stop_flag();
     let control_rx = session.take_control_rx().context("control rx")?;
     let net = {
-        let frames = Arc::clone(&session.frames);
-        let annexb = Arc::clone(&annexb);
         let stats_win = Arc::clone(&session.stats_window);
         let control_tx = session.control_tx.clone();
         let source = source.clone();
@@ -244,8 +232,6 @@ fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -
             .stack_size(SMALL_STACK)
             .spawn(move || {
                 network_loop(
-                    frames,
-                    annexb,
                     stats_win,
                     control_tx,
                     control_rx,
@@ -259,24 +245,25 @@ fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -
     };
 
     let dec = {
-        let annexb = Arc::clone(&annexb);
+        let frames = Arc::clone(&session.frames);
         let control_tx = session.control_tx.clone();
         let source = source.clone();
         let decoder = opts.decoder.clone();
         let stop = Arc::clone(&stop);
         let counters = Arc::clone(&counters);
         thread::spawn(move || {
-            decode_loop(annexb, control_tx, source, decoder, stop, counters);
+            decode_loop(frames, control_tx, source, decoder, stop, counters);
         })
     };
 
-    let stats = opts.stats.then(|| {
+    let stats = (opts.stats || opts.verbose).then(|| {
         let counters = Arc::clone(&counters);
         let stats_win = Arc::clone(&session.stats_window);
+        let frames = Arc::clone(&session.frames);
         let stop = Arc::clone(&stats_stop);
         thread::Builder::new()
             .stack_size(SMALL_STACK)
-            .spawn(move || stats_loop(counters, stats_win, stop))
+            .spawn(move || stats_loop(counters, stats_win, frames, stop))
             .expect("stats thread")
     });
 
@@ -290,14 +277,13 @@ fn drive_session(mut session: Session, source: FrameSource, opts: &MirrorOpts) -
     if let Some(h) = stats {
         let _ = h.join();
     }
+    let why = session.end_reason();
     session.join_transport();
-    Ok(())
+    Ok(why)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn network_loop(
-    frames: Arc<krapy_transport::LatestFrame>,
-    annexb: Arc<LatestSlot<CompleteFrame>>,
     stats_win: Arc<Mutex<krapy_transport::NetWindow>>,
     control_tx: Sender<Control>,
     control_rx: Receiver<Control>,
@@ -324,17 +310,12 @@ fn network_loop(
                 max_size: q.max_size,
             });
         }
-        if let Some(cf) = frames.take() {
-            counters.frames_in.fetch_add(1, Ordering::Relaxed);
-            annexb.put(cf);
-        } else {
-            thread::sleep(POLL);
-        }
+        thread::sleep(NET_TICK);
     }
 }
 
 fn decode_loop(
-    annexb: Arc<LatestSlot<CompleteFrame>>,
+    frames: Arc<FrameQueue>,
     control_tx: Sender<Control>,
     source: FrameSource,
     decoder: Option<String>,
@@ -343,14 +324,25 @@ fn decode_loop(
 ) {
     let mut dec: Box<dyn Decoder> = match open(decoder.as_deref()) {
         Ok(d) => d,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("no video decoder: {e}");
+            return;
+        }
     };
-    let mut last_kf = Instant::now() - Duration::from_millis(500);
+    let mut last_kf = Instant::now() - KEY_RETRY;
+    let mut ask_key = |frames: &FrameQueue| {
+        frames.broken();
+        if last_kf.elapsed() >= KEY_RETRY {
+            let _ = control_tx.send(Control::Keyframe);
+            last_kf = Instant::now();
+        }
+    };
     while !stop.load(Ordering::Relaxed) {
-        let Some(cf) = annexb.take() else {
+        let Some(cf) = frames.pop() else {
             thread::sleep(POLL);
             continue;
         };
+        counters.frames_in.fetch_add(1, Ordering::Relaxed);
         let t0 = Instant::now();
         match dec.decode(&cf.data) {
             Ok(Some(frame)) => {
@@ -359,14 +351,19 @@ fn decode_loop(
                 counters.decode_samples.fetch_add(1, Ordering::Relaxed);
                 counters.frames_out.fetch_add(1, Ordering::Relaxed);
                 source.publish(frame);
+                let lat = cf.received.elapsed().as_micros() as u64;
+                counters.lat_us.fetch_add(lat, Ordering::Relaxed);
+                counters.lat_samples.fetch_add(1, Ordering::Relaxed);
+                counters.lat_max_us.fetch_max(lat, Ordering::Relaxed);
             }
-            Ok(None) => {}
-            Err(_) => {
-                if last_kf.elapsed() >= Duration::from_millis(500) {
-                    let _ = control_tx.send(Control::Keyframe);
-                    last_kf = Instant::now();
+            Ok(None) => {
+                if dec.needs_keyframe() && !frames.waiting_for_key() {
+                    ask_key(&frames);
                 }
+            }
+            Err(_) => {
                 dec.reset();
+                ask_key(&frames);
             }
         }
     }
@@ -375,6 +372,7 @@ fn decode_loop(
 fn stats_loop(
     counters: Arc<Counters>,
     stats_win: Arc<Mutex<krapy_transport::NetWindow>>,
+    frames: Arc<FrameQueue>,
     stop: Arc<AtomicBool>,
 ) {
     let mut prev_in = 0u64;
@@ -401,8 +399,23 @@ fn stats_loop(
             .ok()
             .map(|w| w.total_dropped())
             .unwrap_or(0);
+        let n = counters.lat_samples.swap(0, Ordering::Relaxed);
+        let sum = counters.lat_us.swap(0, Ordering::Relaxed);
+        let max = counters.lat_max_us.swap(0, Ordering::Relaxed);
+        let desk_ms = if n > 0 {
+            sum as f64 / n as f64 / 1000.0
+        } else {
+            0.0
+        };
+        let skipped = frames.skipped();
         println!(
-            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={dropped} decode={decode_ms:.1}ms",
+            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={dropped} skipped={skipped} decode={decode_ms:.1}ms",
+        );
+        println!(
+            "latency ~{:.1}ms (network ~{:.1}ms + receive-to-screen {desk_ms:.1}ms avg, {:.1}ms max)",
+            rtt as f64 / 2.0 + desk_ms,
+            rtt as f64 / 2.0,
+            max as f64 / 1000.0,
         );
     }
 }
