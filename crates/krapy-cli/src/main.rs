@@ -84,6 +84,12 @@ enum Command {
         device: Option<String>,
         #[command(flatten)]
         stream: StreamArgs,
+        /// mirror over USB with adb reverse
+        #[arg(long)]
+        usb: bool,
+        /// adb device serial when more than one phone is plugged in
+        #[arg(long)]
+        serial: Option<String>,
     },
     /// Check network, port and adb setup
     Doctor {
@@ -91,10 +97,17 @@ enum Command {
         #[arg(long, default_value_t = 27183)]
         port: u16,
     },
-    /// adb fallback: pair or connect over wireless debugging
+    /// adb: USB mirroring, or pair/connect over wireless debugging
     Adb {
+        /// device id or alias for USB mirroring (default when only one paired phone)
+        device: Option<String>,
+        #[command(flatten)]
+        stream: StreamArgs,
+        /// adb device serial when more than one phone is plugged in
+        #[arg(long, global = true)]
+        serial: Option<String>,
         #[command(subcommand)]
-        cmd: AdbCommand,
+        cmd: Option<AdbCommand>,
     },
     /// Give a paired phone a short name
     Alias {
@@ -140,6 +153,8 @@ struct StreamArgs {
 
 #[derive(Subcommand)]
 enum AdbCommand {
+    /// USB mirroring via adb reverse (same as krapy connect --usb)
+    Usb,
     /// pair over wireless debugging
     Pair {
         /// phone wireless debugging address
@@ -193,13 +208,31 @@ fn main() -> Result<()> {
         Command::Pair { stream, name, adb } => {
             cmd::pair::run(stream.port, &name, stream_opts(&stream), adb)
         }
-        Command::Connect { device, stream } => {
-            cmd::connect::run(device, stream.port, stream_opts(&stream))
+        Command::Connect {
+            device,
+            stream,
+            usb,
+            serial,
+        } => {
+            let opts = stream_opts(&stream);
+            if usb {
+                cmd::connect::run_usb(device, serial, stream.port, opts)
+            } else {
+                cmd::connect::run(device, stream.port, opts)
+            }
         }
         Command::Doctor { port } => cmd::doctor::run(port),
-        Command::Adb { cmd } => match cmd {
-            AdbCommand::Pair { host_port, code } => cmd::adb::pair(&host_port, &code),
-            AdbCommand::Connect { host_port } => cmd::adb::connect(&host_port),
+        Command::Adb {
+            device,
+            stream,
+            serial,
+            cmd,
+        } => match cmd {
+            None | Some(AdbCommand::Usb) => {
+                cmd::adb::usb(device, serial, stream.port, stream_opts(&stream))
+            }
+            Some(AdbCommand::Pair { host_port, code }) => cmd::adb::pair(&host_port, &code),
+            Some(AdbCommand::Connect { host_port }) => cmd::adb::connect(&host_port),
         },
         Command::Alias { device, name } => cmd::alias::run(&device, &name),
         Command::Forget { device } => cmd::forget::run(&device),
