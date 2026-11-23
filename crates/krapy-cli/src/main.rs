@@ -149,6 +149,12 @@ struct StreamArgs {
     /// run without a mirror window
     #[arg(long)]
     no_window: bool,
+    /// ignore audio from the phone
+    #[arg(long)]
+    no_audio: bool,
+    /// show touch circles on the phone (USB only)
+    #[arg(long)]
+    show_touches: bool,
 }
 
 #[derive(Subcommand)]
@@ -198,6 +204,8 @@ fn stream_opts(args: &StreamArgs, verbose: bool) -> MirrorOpts {
         stats: args.stats,
         no_window: args.no_window,
         verbose,
+        no_audio: args.no_audio,
+        show_touches: args.show_touches,
     }
 }
 

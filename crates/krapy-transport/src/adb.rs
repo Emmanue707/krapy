@@ -374,6 +374,30 @@ pub fn parse_mdns_services(text: &str) -> Vec<MdnsService> {
     out
 }
 
+pub fn settings_get(serial: &str, namespace: &str, key: &str) -> Result<Option<String>> {
+    let out = run(
+        ["-s", serial, "shell", "settings", "get", namespace, key],
+        RUN_TIMEOUT,
+    )?;
+    let text = require_ok(out, "adb settings get")?.trim().to_string();
+    if text == "null" || text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(text))
+    }
+}
+
+pub fn settings_put(serial: &str, namespace: &str, key: &str, value: &str) -> Result<()> {
+    let out = run(
+        [
+            "-s", serial, "shell", "settings", "put", namespace, key, value,
+        ],
+        RUN_TIMEOUT,
+    )?;
+    require_ok(out, "adb settings put")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

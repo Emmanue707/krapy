@@ -31,6 +31,18 @@ struct ReverseGuard {
     port: u16,
 }
 
+struct ShowTouchesGuard {
+    serial: String,
+    prev: Option<String>,
+}
+
+impl Drop for ShowTouchesGuard {
+    fn drop(&mut self) {
+        let restore = self.prev.as_deref().unwrap_or("0");
+        let _ = adb::settings_put(&self.serial, "system", "show_touches", restore);
+    }
+}
+
 impl Drop for ReverseGuard {
     fn drop(&mut self) {
         let _ = adb::reverse_remove(&self.serial, self.port);
@@ -98,6 +110,18 @@ pub fn run_usb(
     let _reverse = ReverseGuard {
         serial: serial.clone(),
         port,
+    };
+    let _touches = if opts.show_touches {
+        let prev = adb::settings_get(&serial, "system", "show_touches")
+            .ok()
+            .flatten();
+        adb::settings_put(&serial, "system", "show_touches", "1").context("show_touches")?;
+        Some(ShowTouchesGuard {
+            serial: serial.clone(),
+            prev,
+        })
+    } else {
+        None
     };
 
     let dir = Store::config_dir()?;

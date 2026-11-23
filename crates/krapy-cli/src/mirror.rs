@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use krapy_audio::AudioOutput;
 use krapy_core::adaptive::Adaptive;
 use krapy_core::device::{PairedDevice, Store};
 use krapy_core::preset::{Preset, Quality};
@@ -31,6 +32,8 @@ pub struct MirrorOpts {
     pub stats: bool,
     pub no_window: bool,
     pub verbose: bool,
+    pub no_audio: bool,
+    pub show_touches: bool,
 }
 
 impl MirrorOpts {
@@ -243,6 +246,7 @@ fn drive_session(
     let epoch = Arc::new(Instant::now());
     let phone_stats = session.phone_stats_cell();
     let clock = session.clock_cell();
+    let audio_on = Arc::new(AtomicBool::new(false));
     let net = {
         let stats_win = Arc::clone(&session.stats_window);
         let control_tx = session.control_tx.clone();
@@ -250,6 +254,8 @@ fn drive_session(
         let stop = Arc::clone(&stop);
         let counters = Arc::clone(&counters);
         let epoch = Arc::clone(&epoch);
+        let audio_on = Arc::clone(&audio_on);
+        let no_audio = opts.no_audio;
         thread::Builder::new()
             .stack_size(SMALL_STACK)
             .spawn(move || {
@@ -262,9 +268,27 @@ fn drive_session(
                     stop,
                     counters,
                     epoch,
+                    audio_on,
+                    no_audio,
                 );
             })
             .expect("net thread")
+    };
+
+    let audio = if opts.no_audio {
+        None
+    } else {
+        match AudioOutput::from_queue(
+            Arc::clone(&session.audio),
+            Arc::clone(&audio_on),
+            Arc::clone(&stop),
+        ) {
+            Some(a) => Some(a),
+            None => {
+                tracing::warn!("no audio output device");
+                None
+            }
+        }
     };
 
     let dec = {
@@ -306,9 +330,15 @@ fn drive_session(
     });
 
     while !stop.load(Ordering::Relaxed) {
+        if session.take_rotate_request() {
+            source.request_rotate();
+        }
         thread::sleep(Duration::from_millis(50));
     }
 
+    if let Some(a) = audio {
+        a.stop();
+    }
     stats_stop.store(true, Ordering::Relaxed);
     let _ = net.join();
     let _ = dec.join();
@@ -330,6 +360,8 @@ fn network_loop(
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
     epoch: Arc<Instant>,
+    audio_on: Arc<AtomicBool>,
+    no_audio: bool,
 ) {
     let mut last_stats = Instant::now();
     let mut prev_out = 0u64;
@@ -362,6 +394,9 @@ fn network_loop(
                         }
                     }
                     last_pause = Some(paused);
+                }
+                Control::AudioState { on } if !no_audio => {
+                    audio_on.store(on != 0, Ordering::Relaxed);
                 }
                 _ => {}
             }
