@@ -19,6 +19,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
       - run: ./gradlew assembleDebug assembleRelease testDebugUnitTest
       - uses: actions/upload-artifact@v4
         with:
