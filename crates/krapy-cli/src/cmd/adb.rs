@@ -14,6 +14,7 @@ fn pair_host_ip(host_port: &str) -> &str {
 }
 
 pub fn pair(host_port: &str, code: &str) -> Result<()> {
+    adb::require_on_path()?;
     adb::pair(host_port, code)?;
     println!("ok  paired {host_port}");
     let ip = pair_host_ip(host_port);
@@ -46,6 +47,7 @@ pub fn pair(host_port: &str, code: &str) -> Result<()> {
 }
 
 pub fn connect(host_port: &str) -> Result<()> {
+    adb::require_on_path()?;
     adb::connect(host_port)?;
     println!("ok  connected {host_port}");
     Ok(())
