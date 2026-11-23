@@ -1,3 +1,5 @@
+use crate::color::ColorSpec;
+
 #[derive(Default)]
 pub struct Frame {
     pub width: u32,
@@ -7,6 +9,7 @@ pub struct Frame {
     pub v: Vec<u8>,
     pub stride_y: usize,
     pub stride_uv: usize,
+    pub color: ColorSpec,
 }
 
 #[allow(clippy::too_many_arguments)]

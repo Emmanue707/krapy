@@ -1,4 +1,5 @@
 use crate::Decoder;
+use crate::color::{ColorSpec, Matrix};
 use crate::i420::{Frame, pack_yuv420p_into};
 use anyhow::{Result, anyhow};
 use ffmpeg_next::Error as FfmpegError;
@@ -8,6 +9,7 @@ use ffmpeg_next::codec::id::Id;
 use ffmpeg_next::codec::threading;
 use ffmpeg_next::packet::Packet;
 use ffmpeg_next::software::scaling::{context::Context as Scaler, flag::Flags as ScaleFlags};
+use ffmpeg_next::util::color::{Range, Space};
 use ffmpeg_next::util::format::pixel::Pixel;
 use ffmpeg_next::util::frame::video::Video as VideoFrame;
 use std::sync::Once;
@@ -114,10 +116,21 @@ impl FfmpegDecoder {
                 yuv.stride(1),
             );
         }
+        self.bufs[i].color = color_from_video(frame);
         let mut taken = Frame::default();
         std::mem::swap(&mut taken, &mut self.bufs[i]);
         Ok(taken)
     }
+}
+
+fn color_from_video(frame: &VideoFrame) -> ColorSpec {
+    let full_range = frame.color_range() == Range::JPEG;
+    let matrix = match frame.color_space() {
+        Space::SMPTE170M | Space::BT470BG | Space::FCC => Matrix::Bt601,
+        Space::BT709 | Space::Unspecified => Matrix::Bt709,
+        _ => Matrix::Bt709,
+    };
+    ColorSpec { full_range, matrix }
 }
 
 impl Decoder for FfmpegDecoder {

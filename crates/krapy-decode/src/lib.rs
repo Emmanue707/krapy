@@ -1,4 +1,5 @@
 mod annex;
+mod color;
 mod gate;
 mod i420;
 
@@ -8,6 +9,7 @@ mod ffdec;
 #[cfg(feature = "openh264")]
 mod ohdec;
 
+pub use color::{ColorSpec, Matrix, YuvRgb, yuv_rgb_coeffs, yuv_to_rgb};
 pub use i420::Frame;
 
 pub trait Decoder: Send {
