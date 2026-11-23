@@ -37,6 +37,15 @@ impl Drop for ReverseGuard {
     }
 }
 
+fn prepare_usb_launch(serial: &str) -> Result<()> {
+    if !adb::app_installed(serial)? {
+        bail!("{}", adb::missing_app_message());
+    }
+    adb::wake_screen(serial).context("wake phone")?;
+    adb::wait_unlocked(serial)?;
+    Ok(())
+}
+
 fn default_desktop_name() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -106,15 +115,17 @@ pub fn run_usb(
         let id = identity.id();
         let n = urlencoding::encode(&name);
         let uri = format!("krapy://pair?v=1&h=127.0.0.1&p={port}&k={key_b64}&id={id}&n={n}");
+        prepare_usb_launch(&serial)?;
         adb::launch_app(&serial, &uri).context("launch pair uri on phone")?;
-        println!("tap \"Start now\" on the phone");
+        println!("on the phone: tap Start now. If no dialog shows, tap Start in the krapy app.");
         return usb_pair_with_key(listener, store, port, &name, &id, key, opts);
     }
 
     let id = identity.id();
     let uri = format!("krapy://connect?id={id}&h=127.0.0.1&p={port}");
+    prepare_usb_launch(&serial)?;
     adb::launch_app(&serial, &uri).context("launch connect uri on phone")?;
-    println!("tap \"Start now\" on the phone");
+    println!("on the phone: tap Start now. If no dialog shows, tap Start in the krapy app.");
 
     let dev = resolve_device(&store, device.as_deref())?;
     let title = dev

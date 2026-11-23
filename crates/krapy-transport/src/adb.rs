@@ -195,8 +195,57 @@ pub fn wait_usb_device(preferred: Option<&str>) -> Result<String> {
     bail!("{USB_DEVICE_HELP}");
 }
 
+const RELEASE_URL: &str = "https://github.com/Emmanue707/krapy/releases/latest";
+
+pub fn app_installed(serial: &str) -> Result<bool> {
+    let out = run(
+        ["-s", serial, "shell", "pm", "path", "com.waghitech.krapy"],
+        RUN_TIMEOUT,
+    )?;
+    Ok(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+pub fn wake_screen(serial: &str) -> Result<()> {
+    let out = run(
+        ["-s", serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
+        RUN_TIMEOUT,
+    )?;
+    require_ok(out, "wake screen")?;
+    Ok(())
+}
+
+pub fn screen_locked(serial: &str) -> Result<bool> {
+    let power = run(["-s", serial, "shell", "dumpsys", "power"], RUN_TIMEOUT)?;
+    let win = run(["-s", serial, "shell", "dumpsys", "window"], RUN_TIMEOUT)?;
+    let p = String::from_utf8_lossy(&power.stdout);
+    let w = String::from_utf8_lossy(&win.stdout);
+    let locked = p.contains("mDreamingLockscreen=true")
+        || w.contains("mShowingLockscreen=true")
+        || w.contains("isKeyguardShowing=true");
+    Ok(locked)
+}
+
+pub fn wait_unlocked(serial: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    println!("unlock the phone");
+    while Instant::now() < deadline {
+        if !screen_locked(serial)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    bail!("phone still locked after 60s");
+}
+
 pub fn launch_app(serial: &str, uri: &str) -> Result<()> {
-    let quoted = format!("'{}'", uri.replace('\'', ""));
+    // a fresh value each time so android never treats it as the same intent and
+    // just brings the old task to the front without delivering it
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let sep = if uri.contains('?') { '&' } else { '?' };
+    let quoted = format!("'{}{sep}t={nonce}'", uri.replace('\'', ""));
     let uri = quoted.as_str();
     let out = run(
         [
@@ -205,15 +254,38 @@ pub fn launch_app(serial: &str, uri: &str) -> Result<()> {
             "shell",
             "am",
             "start",
+            "-n",
+            "com.waghitech.krapy/.MainActivity",
             "-a",
             "android.intent.action.VIEW",
             "-d",
             uri,
+            "--ez",
+            "auto_start",
+            "true",
+            "--activity-clear-top",
+            "--activity-single-top",
         ],
         RUN_TIMEOUT,
     )?;
-    require_ok(out, "am start")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+    if combined.contains("Error:") || !out.status.success() {
+        let msg = combined.trim();
+        bail!("am start failed: {msg}");
+    }
+    // "intent has been delivered to currently running top-most instance" is fine
+    if combined.contains("brought to the front") {
+        bail!(
+            "krapy was already open and android did not pass it the link; tap Start in the krapy app"
+        );
+    }
     Ok(())
+}
+
+pub fn missing_app_message() -> String {
+    format!("install the krapy APK on the phone first: {RELEASE_URL}")
 }
 
 pub fn pick_serial(preferred: Option<&str>) -> Result<String> {
