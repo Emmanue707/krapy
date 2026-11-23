@@ -43,6 +43,8 @@ class MirrorService : Service(), LinkCallbacks {
     private var peersDb: Peers? = null
     private var displayW: Int = 0
     private var displayH: Int = 0
+    private var lastKnownDisplayW: Int = 0
+    private var lastKnownDisplayH: Int = 0
     private var captureBaseNs: Long = 0
     private val mainHandler = Handler(Looper.getMainLooper())
     private var projectionCallback: MediaProjection.Callback? = null
@@ -59,110 +61,132 @@ class MirrorService : Service(), LinkCallbacks {
             stopSession("stopped")
             return START_NOT_STICKY
         }
-        val peerId = intent?.getStringExtra(EXTRA_PEER_ID) ?: run {
-            stopSelf()
+        try {
+            val peerId = intent?.getStringExtra(EXTRA_PEER_ID) ?: run {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(EXTRA_RESULT_DATA)
+            }
+            if (data == null || resultCode == 0) {
+                stopSession("no projection")
+                return START_NOT_STICKY
+            }
+            val p = Peers(this).list().firstOrNull { it.id == peerId }
+            if (p == null) {
+                stopSession("unknown peer")
+                return START_NOT_STICKY
+            }
+            if (running.getAndSet(true)) {
+                stopSession("restarted")
+            }
+            peer = p
+            activePeerName = p.name
+            peersDb = Peers(this)
+            startForegroundNotif(p.name, false)
+            captureBaseNs = System.nanoTime()
+            readDisplaySize()
+            lastKnownDisplayW = displayW
+            lastKnownDisplayH = displayH
+            val peers = Peers(this)
+            val lk = Link(p, peers.phoneId(), peers.phoneName(), this)
+            link = lk
+            val enc = Encoder(lk, captureBaseNs)
+            encoder = enc
+            startProjection(resultCode, data, enc)
+            pushInputScale(enc)
+            val start = Wire.Control.Start(
+                width = enc.currentWidth(),
+                height = enc.currentHeight(),
+                fps = enc.currentFps(),
+                bitrate = enc.currentBitrate(),
+                codec = 1,
+            )
+            registerDisplayListener()
+            registerNetworkCallback()
+            SessionBridge.sendClipboard = { text ->
+                lk.sendTcpSealed(Wire.encodeControl(Wire.Control.Clipboard(text)))
+            }
+            thread(name = "krapy-connect", isDaemon = true) {
+                if (!lk.connect(start)) {
+                    mainHandler.post {
+                        Toast.makeText(
+                            this,
+                            "can't reach ${p.host}:${p.port}. Same Wi-Fi? On the PC run krapy doctor (firewall)",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    beginReconnect(immediate = false)
+                } else {
+                    reconnecting.set(false)
+                }
+            }
             return START_NOT_STICKY
-        }
-        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-        val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getParcelableExtra(EXTRA_RESULT_DATA)
-        }
-        if (data == null || resultCode == 0) {
-            stopSession("no projection")
-            return START_NOT_STICKY
-        }
-        val p = Peers(this).list().firstOrNull { it.id == peerId }
-        if (p == null) {
-            stopSession("unknown peer")
-            return START_NOT_STICKY
-        }
-        if (running.getAndSet(true)) {
-            stopSession("restarted")
-        }
-        peer = p
-        activePeerName = p.name
-        peersDb = Peers(this)
-        startForegroundNotif(p.name, false)
-        captureBaseNs = System.nanoTime()
-        readDisplaySize()
-        val peers = Peers(this)
-        val lk = Link(p, peers.phoneId(), peers.phoneName(), this)
-        link = lk
-        val enc = Encoder(lk, captureBaseNs)
-        encoder = enc
-        startProjection(resultCode, data, enc)
-        pushInputScale(enc)
-        val start = Wire.Control.Start(
-            width = enc.currentWidth(),
-            height = enc.currentHeight(),
-            fps = enc.currentFps(),
-            bitrate = enc.currentBitrate(),
-            codec = 1,
-        )
-        registerDisplayListener()
-        registerNetworkCallback()
-        SessionBridge.sendClipboard = { text ->
-            lk.sendTcpSealed(Wire.encodeControl(Wire.Control.Clipboard(text)))
-        }
-        if (!lk.connect(start)) {
+        } catch (t: Throwable) {
+            val reason = t.message?.take(120) ?: t.javaClass.simpleName
+            CrashLog.record(this, t, "start")
             mainHandler.post {
                 Toast.makeText(
                     this,
-                    "can't reach ${p.host}:${p.port}. Same Wi-Fi? On the PC run krapy doctor (firewall)",
+                    "krapy couldn't start mirroring: $reason",
                     Toast.LENGTH_LONG,
                 ).show()
             }
-            beginReconnect(immediate = false)
-        } else {
-            reconnecting.set(false)
+            stopSession("start failed")
+            return START_NOT_STICKY
         }
-        return START_STICKY
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (!running.get()) return
-        readDisplaySize()
-        val enc = encoder ?: return
-        enc.restart(displayW, displayH, null)
-        resetVirtualDisplay(enc.inputSurface)
-        pushInputScale(enc)
+        try {
+            onDisplayGeometryChanged()
+        } catch (t: Throwable) {
+            CrashLog.record(this, t, "onConfigurationChanged")
+        }
     }
 
     override fun onControl(c: Wire.Control) {
         mainHandler.post {
-            when (c) {
-                is Wire.Control.Quality -> {
-                    val enc = encoder ?: return@post
-                    val oldFps = enc.currentFps()
-                    enc.setQuality(c.bitrate, c.fps, c.maxSize)
-                    var needSurface = false
-                    if (c.maxSize > 0) {
-                        val (nw, nh) = enc.scaledSize(displayW, displayH, c.maxSize)
-                        if (nw != enc.currentWidth() || nh != enc.currentHeight()) {
-                            enc.applyMaxSize(displayW, displayH, c.maxSize)
+            try {
+                when (c) {
+                    is Wire.Control.Quality -> {
+                        val enc = encoder ?: return@post
+                        val oldFps = enc.currentFps()
+                        enc.setQuality(c.bitrate, c.fps, c.maxSize)
+                        var needSurface = false
+                        if (c.maxSize > 0) {
+                            val (nw, nh) = enc.scaledSize(displayW, displayH, c.maxSize)
+                            if (nw != enc.currentWidth() || nh != enc.currentHeight()) {
+                                enc.applyMaxSize(displayW, displayH, c.maxSize)
+                                needSurface = true
+                            }
+                        }
+                        if (c.fps > 0 && c.fps != oldFps) {
+                            enc.restartCodecKeepingSurface()
                             needSurface = true
                         }
+                        if (needSurface) attachVirtualDisplaySurface(enc.inputSurface)
+                        pushInputScale(enc)
                     }
-                    if (c.fps > 0 && c.fps != oldFps) {
-                        enc.restartCodecKeepingSurface()
-                        needSurface = true
+                    Wire.Control.Keyframe -> encoder?.requestKeyframe()
+                    Wire.Control.Bye -> stopSession("bye")
+                    is Wire.Control.Touch -> if (InputService.InputBridge.enabled()) {
+                        InputService.InputBridge.touch(c.action, c.pointer, c.x, c.y)
                     }
-                    if (needSurface) resetVirtualDisplay(enc.inputSurface)
-                    pushInputScale(enc)
+                    is Wire.Control.Key -> if (InputService.InputBridge.enabled()) InputService.InputBridge.key(c.code)
+                    is Wire.Control.Text -> if (InputService.InputBridge.enabled()) InputService.InputBridge.text(c.text)
+                    is Wire.Control.Clipboard -> applyDesktopClipboard(c.text)
+                    else -> {}
                 }
-                Wire.Control.Keyframe -> encoder?.requestKeyframe()
-                Wire.Control.Bye -> stopSession("bye")
-                is Wire.Control.Touch -> if (InputService.InputBridge.enabled()) {
-                    InputService.InputBridge.touch(c.action, c.pointer, c.x, c.y)
-                }
-                is Wire.Control.Key -> if (InputService.InputBridge.enabled()) InputService.InputBridge.key(c.code)
-                is Wire.Control.Text -> if (InputService.InputBridge.enabled()) InputService.InputBridge.text(c.text)
-                is Wire.Control.Clipboard -> applyDesktopClipboard(c.text)
-                else -> {}
+            } catch (t: Throwable) {
+                CrashLog.record(this, t, "onControl")
             }
         }
     }
@@ -277,10 +301,11 @@ class MirrorService : Service(), LinkCallbacks {
 
     private fun startProjection(resultCode: Int, data: Intent, enc: Encoder) {
         val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val proj = mgr.getMediaProjection(resultCode, data) ?: run {
-            stopSession("projection denied")
-            return
-        }
+        val proj = try {
+            mgr.getMediaProjection(resultCode, data)
+        } catch (e: SecurityException) {
+            throw IllegalStateException("projection: ${e.message}")
+        } ?: throw IllegalStateException("projection denied")
         if (Build.VERSION.SDK_INT >= 34) {
             val cb = object : MediaProjection.Callback() {}
             projectionCallback = cb
@@ -289,7 +314,11 @@ class MirrorService : Service(), LinkCallbacks {
         projection = proj
         enc.start(displayW, displayH, 1280, 30, 4_000_000)
         val surface = enc.inputSurface
-        virtualDisplay = createDisplay(proj, surface, enc.currentWidth(), enc.currentHeight())
+        try {
+            virtualDisplay = createDisplay(proj, surface, enc.currentWidth(), enc.currentHeight())
+        } catch (e: SecurityException) {
+            throw IllegalStateException("virtual display: ${e.message}")
+        }
     }
 
     private fun createDisplay(
@@ -313,11 +342,27 @@ class MirrorService : Service(), LinkCallbacks {
         )
     }
 
-    private fun resetVirtualDisplay(surface: Surface?) {
-        val vd = virtualDisplay
-        vd?.release()
-        val proj = projection ?: return
-        virtualDisplay = createDisplay(proj, surface, encoder?.currentWidth() ?: displayW, encoder?.currentHeight() ?: displayH)
+    private fun attachVirtualDisplaySurface(surface: Surface?) {
+        val vd = virtualDisplay ?: return
+        val s = surface ?: return
+        val w = encoder?.currentWidth() ?: displayW
+        val h = encoder?.currentHeight() ?: displayH
+        val dpi = resources.displayMetrics.densityDpi
+        vd.resize(w, h, dpi)
+        vd.setSurface(s)
+    }
+
+    private fun onDisplayGeometryChanged() {
+        val prevW = lastKnownDisplayW
+        val prevH = lastKnownDisplayH
+        readDisplaySize()
+        if (displayW == prevW && displayH == prevH) return
+        lastKnownDisplayW = displayW
+        lastKnownDisplayH = displayH
+        val enc = encoder ?: return
+        enc.restart(displayW, displayH, null)
+        attachVirtualDisplaySurface(enc.inputSurface)
+        pushInputScale(enc)
     }
 
     private fun registerDisplayListener() {
@@ -328,11 +373,11 @@ class MirrorService : Service(), LinkCallbacks {
             override fun onDisplayChanged(displayId: Int) {
                 if (displayId != Display.DEFAULT_DISPLAY) return
                 if (!running.get()) return
-                readDisplaySize()
-                val enc = encoder ?: return
-                enc.restart(displayW, displayH, null)
-                resetVirtualDisplay(enc.inputSurface)
-                pushInputScale(enc)
+                try {
+                    onDisplayGeometryChanged()
+                } catch (t: Throwable) {
+                    CrashLog.record(this@MirrorService, t, "onDisplayChanged")
+                }
             }
         }
         displayListener = listener
