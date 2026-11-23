@@ -6,6 +6,7 @@ const VER: u8 = 1;
 const MAX_VIDEO_DATA: usize = 1100;
 const MAX_NAME: usize = 255;
 const MAX_UTF8: usize = 64 * 1024;
+pub const MAX_TCP_VIDEO: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
@@ -53,6 +54,15 @@ pub enum Control {
     },
     Text {
         text: String,
+    },
+    // video over tcp, used when udp can't get through (usb / adb reverse)
+    VideoChunk {
+        frame_id: u32,
+        idx: u16,
+        count: u16,
+        flags: u8,
+        capture_us: u64,
+        data: Vec<u8>,
     },
     Bye,
 }
@@ -248,6 +258,25 @@ pub fn encode_control(c: &Control) -> Result<Vec<u8>, WireError> {
             out.push(0x22);
             out.extend_from_slice(text.as_bytes());
         }
+        Control::VideoChunk {
+            frame_id,
+            idx,
+            count,
+            flags,
+            capture_us,
+            data,
+        } => {
+            if data.len() > MAX_TCP_VIDEO {
+                return Err(WireError::BadLength);
+            }
+            out.push(0x30);
+            out.extend_from_slice(&frame_id.to_be_bytes());
+            out.extend_from_slice(&idx.to_be_bytes());
+            out.extend_from_slice(&count.to_be_bytes());
+            out.push(*flags);
+            out.extend_from_slice(&capture_us.to_be_bytes());
+            out.extend_from_slice(data);
+        }
         Control::Bye => out.push(0x7f),
     }
     Ok(out)
@@ -318,6 +347,23 @@ pub fn decode_control(buf: &[u8]) -> Result<Control, WireError> {
                 .map_err(|_| WireError::BadUtf8)?
                 .to_string();
             Ok(Control::Text { text })
+        }
+        0x30 => {
+            let hdr = 1 + 4 + 2 + 2 + 1 + 8;
+            if buf.len() < hdr {
+                return Err(WireError::Truncated);
+            }
+            if buf.len() - hdr > MAX_TCP_VIDEO {
+                return Err(WireError::BadLength);
+            }
+            Ok(Control::VideoChunk {
+                frame_id: u32::from_be_bytes(buf[1..5].try_into().expect("len")),
+                idx: u16::from_be_bytes(buf[5..7].try_into().expect("len")),
+                count: u16::from_be_bytes(buf[7..9].try_into().expect("len")),
+                flags: buf[9],
+                capture_us: u64::from_be_bytes(buf[10..18].try_into().expect("len")),
+                data: buf[hdr..].to_vec(),
+            })
         }
         0x7f => Ok(Control::Bye),
         _ => Err(WireError::UnknownType),
@@ -499,6 +545,14 @@ mod tests {
             Control::Key { code: 2 },
             Control::Text {
                 text: "type".into(),
+            },
+            Control::VideoChunk {
+                frame_id: 7,
+                idx: 1,
+                count: 3,
+                flags: 1,
+                capture_us: 123_456,
+                data: vec![0, 0, 0, 1, 0x65],
             },
             Control::Bye,
         ];
