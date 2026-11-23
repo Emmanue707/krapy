@@ -1,1 +1,3 @@
 -keep class com.google.zxing.** { *; }
+-dontobfuscate
+-keepattributes SourceFile,LineNumberTable
