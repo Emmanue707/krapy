@@ -25,6 +25,7 @@ krapy-core = { workspace = true }
 krapy-decode = { path = "../krapy-decode", default-features = false }
 krapy-transport = { path = "../krapy-transport" }
 krapy-render = { path = "../krapy-render" }
+krapy-audio = { path = "../krapy-audio" }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "krapy-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+cpal = "0.15"
+parking_lot = "0.12"
+tracing = { workspace = true }
+krapy-transport = { path = "../krapy-transport" }
