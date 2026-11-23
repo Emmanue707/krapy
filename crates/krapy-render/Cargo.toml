@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
 winit = { version = "0.30", default-features = true }
 wgpu = "26"
 pollster = "0.4"
