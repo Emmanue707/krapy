@@ -30,6 +30,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="krapy" android:host="pair" />
+                <data android:scheme="krapy" android:host="connect" />
             </intent-filter>
         </activity>
 

@@ -15,6 +15,12 @@ data class PairingData(
     val secret: ByteArray,
 )
 
+data class ConnectData(
+    val desktopId: String,
+    val host: String,
+    val port: Int,
+)
+
 object Pairing {
     private val idHex = Regex("^[0-9a-fA-F]{16}$")
 
@@ -56,6 +62,35 @@ object Pairing {
         val info = "pair".toByteArray(StandardCharsets.UTF_8)
         val secret = Hkdf.sha256(k, salt, info, 32)
         return PairingData(host, port, desktopId.lowercase(), desktopName, secret)
+    }
+
+    fun parseConnect(uriString: String): ConnectData {
+        val trimmed = uriString.trim()
+        if (trimmed.isEmpty()) throw PairingException("empty uri")
+        val uri = try {
+            URI(trimmed)
+        } catch (e: Exception) {
+            throw PairingException("invalid uri: ${e.message}")
+        }
+        if (uri.scheme != "krapy") throw PairingException("scheme must be krapy")
+        if (uri.host != "connect") throw PairingException("host must be connect")
+        val q = uri.rawQuery ?: throw PairingException("missing query")
+        val params = linkedMapOf<String, String>()
+        for (part in q.split("&")) {
+            if (part.isEmpty()) continue
+            val eq = part.indexOf('=')
+            if (eq < 0) throw PairingException("bad query segment")
+            val key = URLDecoder.decode(part.substring(0, eq), StandardCharsets.UTF_8)
+            val value = URLDecoder.decode(part.substring(eq + 1), StandardCharsets.UTF_8)
+            params[key] = value
+        }
+        val desktopId = params["id"]?.takeIf { idHex.matches(it) }
+            ?: throw PairingException("id must be 16 hex chars")
+        val host = params["h"]?.takeIf { it.isNotEmpty() }
+            ?: throw PairingException("missing h")
+        val port = params["p"]?.toIntOrNull()?.takeIf { it in 1..65535 }
+            ?: throw PairingException("missing or invalid p")
+        return ConnectData(desktopId.lowercase(), host, port)
     }
 
     fun decodeBase64Url(input: String): ByteArray {

@@ -44,4 +44,23 @@ class PairingTest {
         val k = b64Url(ByteArray(32))
         Pairing.parse("krapy://pair?v=1&h=h&p=1&k=$k&id=short&n=x")
     }
+
+    @Test
+    fun parseConnectValid() {
+        val id = "0123456789abcdef"
+        val data = Pairing.parseConnect("krapy://connect?id=$id&h=127.0.0.1&p=27183")
+        assertEquals(id, data.desktopId)
+        assertEquals("127.0.0.1", data.host)
+        assertEquals(27183, data.port)
+    }
+
+    @Test(expected = PairingException::class)
+    fun parseConnectMissingId() {
+        Pairing.parseConnect("krapy://connect?h=127.0.0.1&p=27183")
+    }
+
+    @Test(expected = PairingException::class)
+    fun parseConnectBadPort() {
+        Pairing.parseConnect("krapy://connect?id=0123456789abcdef&h=127.0.0.1&p=0")
+    }
 }
