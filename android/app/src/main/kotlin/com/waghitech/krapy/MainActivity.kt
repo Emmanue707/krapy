@@ -44,6 +44,9 @@ class MainActivity : Activity() {
     private var pendingHostOverride: String? = null
     private var pendingPortOverride: Int? = null
     private var remoteHintText = "remote control needs accessibility (optional)"
+    private var pendingResumeCapture = false
+    private var resumedNow = false
+    private var usbPromptBlock: LinearLayout? = null
     private val basePadH by lazy { dp(20) }
     private val basePadTop by lazy { dp(16) }
     private val basePadBottom by lazy { dp(20) }
@@ -151,8 +154,14 @@ class MainActivity : Activity() {
         handleViewIntent(intent)
     }
 
+    override fun onPause() {
+        super.onPause()
+        resumedNow = false
+    }
+
     override fun onResume() {
         super.onResume()
+        resumedNow = true
         val prefs = uiPrefs()
         if (prefs.getBoolean(PREF_SENT_TO_APP_INFO, false)) {
             prefs.edit().putBoolean(PREF_SENT_TO_APP_INFO, false).apply()
@@ -169,6 +178,13 @@ class MainActivity : Activity() {
         }
         if (::listView.isInitialized) {
             refreshList()
+        }
+        if (pendingResumeCapture) {
+            pendingResumeCapture = false
+            val peer = pendingPeer
+            if (peer != null) {
+                beginCapture(peer, pendingHostOverride, pendingPortOverride)
+            }
         }
     }
 
@@ -199,6 +215,8 @@ class MainActivity : Activity() {
                 pendingPeer = null
                 if (peer == null) return
                 if (resultCode != RESULT_OK || data == null) {
+                    clearUsbPrompt()
+                    statusLine.text = "screen capture was cancelled, tap Start to try again"
                     Toast.makeText(this, "capture denied", Toast.LENGTH_SHORT).show()
                     return
                 }
@@ -212,6 +230,7 @@ class MainActivity : Activity() {
                 )
                 pendingHostOverride = null
                 pendingPortOverride = null
+                clearUsbPrompt()
                 refreshStatus()
             }
         } catch (t: Throwable) {
@@ -249,13 +268,14 @@ class MainActivity : Activity() {
     private fun handleViewIntent(intent: Intent?) {
         val uri = intent?.data ?: return
         if (intent.action != Intent.ACTION_VIEW) return
+        val autoStart = intent.getBooleanExtra("auto_start", false)
         when (uri.host) {
             "pair" -> pairUri(uri.toString())
-            "connect" -> connectUri(uri.toString())
+            "connect" -> connectUri(uri.toString(), autoStart)
         }
     }
 
-    private fun connectUri(raw: String) {
+    private fun connectUri(raw: String, autoStart: Boolean = false) {
         try {
             val data = Pairing.parseConnect(raw)
             val peer = peers.list().firstOrNull { it.id == data.desktopId }
@@ -267,7 +287,17 @@ class MainActivity : Activity() {
                 ).show()
                 return
             }
-            startMirroring(peer, data.host, data.port)
+            if (MirrorService.activePeerName != null) {
+                stopMirrorService()
+            }
+            if (data.host == "127.0.0.1" || data.host.equals("localhost", ignoreCase = true)) {
+                showUsbPrompt(peer, data.host, data.port, autoStart)
+            } else {
+                pendingPeer = peer
+                pendingHostOverride = data.host
+                pendingPortOverride = data.port
+                startWhenResumed()
+            }
         } catch (e: PairingException) {
             Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
         } catch (t: Throwable) {
@@ -285,7 +315,13 @@ class MainActivity : Activity() {
             refreshList()
             statusLine.text = "connecting to ${data.desktopName}…"
             Toast.makeText(this, "paired ${data.desktopName}", Toast.LENGTH_SHORT).show()
-            startMirroring(peer)
+            if (MirrorService.activePeerName != null) {
+                stopMirrorService()
+            }
+            pendingPeer = peer
+            pendingHostOverride = null
+            pendingPortOverride = null
+            startWhenResumed()
         } catch (e: PairingException) {
             Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
         } catch (t: Throwable) {
@@ -396,6 +432,59 @@ class MainActivity : Activity() {
             CrashLog.record(this, t, "startMirroring")
             Toast.makeText(this, t.message ?: "mirror failed", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun showUsbPrompt(peer: Peer, host: String, port: Int, autoStart: Boolean) {
+        pendingPeer = peer
+        pendingHostOverride = host
+        pendingPortOverride = port
+        clearUsbPrompt()
+        val block = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        block.addView(TextView(this).apply {
+            text = "${peer.name} wants to mirror over USB"
+            textSize = 14f
+            setTextColor(textPrimary())
+        })
+        block.addView(primaryButton("Start") {
+            beginCapture(peer, host, port)
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) }
+        })
+        usbPromptBlock = block
+        (statusLine.parent as? ViewGroup)?.let { parent ->
+            val idx = parent.indexOfChild(statusLine)
+            parent.addView(block, idx + 1)
+        }
+        statusLine.text = "${peer.name} wants to mirror over USB"
+        if (autoStart) startWhenResumed()
+    }
+
+    // starting the capture dialog before the activity is resumed gets dropped on some phones
+    private fun startWhenResumed() {
+        val peer = pendingPeer ?: return
+        if (resumedNow) {
+            pendingResumeCapture = false
+            beginCapture(peer, pendingHostOverride, pendingPortOverride)
+        } else {
+            pendingResumeCapture = true
+        }
+    }
+
+    private fun clearUsbPrompt() {
+        usbPromptBlock?.let { block ->
+            (block.parent as? ViewGroup)?.removeView(block)
+        }
+        usbPromptBlock = null
+    }
+
+    private fun stopMirrorService() {
+        startService(Intent(this, MirrorService::class.java).setAction(MirrorService.ACTION_STOP))
     }
 
     private fun beginCapture(
