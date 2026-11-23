@@ -1,5 +1,6 @@
 package com.waghitech.krapy
 
+import android.os.Looper
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.DatagramPacket
@@ -9,6 +10,7 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -44,6 +46,7 @@ class Link(
     private var udpThread: Thread? = null
     private var keepaliveThread: Thread? = null
     private var pingWatchThread: Thread? = null
+    private val tcpSender = Executors.newSingleThreadExecutor { r -> Thread(r, "krapy-tcp-send") }
 
     fun isConnected(): Boolean = connected.get()
 
@@ -113,11 +116,16 @@ class Link(
                     start.codec,
                 ),
             )
-            sendTcpSealed(startBytes)
+            val seal = tcpSeal!!
+            synchronized(tcpSendLock) {
+                val frame = Wire.encodeTcpFrame(seal.sealTcp(startBytes))
+                out.write(frame)
+                out.flush()
+            }
             val dg = DatagramSocket()
             dg.connect(InetSocketAddress(h, p))
             udp = dg
-            sendUdpRaw(Wire.DG_KEEPALIVE)
+            writeUdpKeepalive(dg, udpSeal!!)
             connected.set(true)
             lastPingMs.set(System.currentTimeMillis())
             startReaderThreads()
@@ -173,25 +181,18 @@ class Link(
 
     fun sendTcpSealed(plaintext: ByteArray) {
         if (!connected.get()) return
-        val seal = tcpSeal ?: return
-        val out = tcpOut ?: return
-        try {
-            synchronized(tcpSendLock) {
-                val frame = Wire.encodeTcpFrame(seal.sealTcp(plaintext))
-                synchronized(out) {
-                    out.write(frame)
-                    out.flush()
-                }
-            }
-        } catch (_: Exception) {
-            if (!halt.get()) onTransportLost("tcp write")
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            tcpSender.execute { sendTcpSealedDirect(plaintext) }
+            return
         }
+        sendTcpSealedDirect(plaintext)
     }
 
     fun close() {
         halt.set(true)
         connected.set(false)
         closeTransport()
+        tcpSender.shutdown()
     }
 
     fun closeTransport() {
@@ -220,6 +221,35 @@ class Link(
         udpThread = null
         keepaliveThread = null
         pingWatchThread = null
+    }
+
+    private fun sendTcpSealedDirect(plaintext: ByteArray) {
+        if (!connected.get()) return
+        val seal = tcpSeal ?: return
+        val out = tcpOut ?: return
+        try {
+            synchronized(tcpSendLock) {
+                val frame = Wire.encodeTcpFrame(seal.sealTcp(plaintext))
+                out.write(frame)
+                out.flush()
+            }
+        } catch (_: Exception) {
+            if (!halt.get()) onTransportLost("tcp write")
+        }
+    }
+
+    private fun writeUdpKeepalive(dg: DatagramSocket, seal: Sealer) {
+        val body = Wire.encodeDatagramBody(Wire.DG_KEEPALIVE)
+        val header = udpWireBuf
+        synchronized(udpSendLock) {
+            header[0] = body[0]
+            putU64(header, 1, seal.counter())
+            val wire = seal.sealUdp(header.copyOfRange(0, 9), ByteArray(0))
+            try {
+                dg.send(DatagramPacket(wire, wire.size))
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun onTransportLost(reason: String) {

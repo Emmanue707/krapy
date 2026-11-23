@@ -42,6 +42,18 @@ object Wire {
         return out
     }
 
+    fun encodeWelcome(desktopId: ByteArray, nonceD: ByteArray): ByteArray {
+        val out = ByteArray(29)
+        out[0] = 'K'.code.toByte()
+        out[1] = 'R'.code.toByte()
+        out[2] = 'P'.code.toByte()
+        out[3] = 'Y'.code.toByte()
+        out[4] = 1
+        System.arraycopy(desktopId, 0, out, 5, 8)
+        System.arraycopy(nonceD, 0, out, 13, 16)
+        return out
+    }
+
     fun decodeWelcome(body: ByteArray): Pair<ByteArray, ByteArray> {
         if (body.size < 29) throw WireException("truncated welcome")
         if (body[0] != 'K'.code.toByte() || body[1] != 'R'.code.toByte() ||
@@ -108,6 +120,17 @@ object Wire {
     fun decodeControl(buf: ByteArray): Control {
         if (buf.isEmpty()) throw WireException("empty control")
         return when (buf[0].toInt() and 0xff) {
+            0x01 -> {
+                if (buf.size < 11) throw WireException("truncated start")
+                Control.Start(
+                    width = u16(buf, 1),
+                    height = u16(buf, 3),
+                    fps = buf[5].toInt() and 0xff,
+                    bitrate = u32(buf, 6),
+                    codec = buf[10].toInt() and 0xff,
+                )
+            }
+
             0x02 -> {
                 if (buf.size < 8) throw WireException("truncated quality")
                 Control.Quality(
