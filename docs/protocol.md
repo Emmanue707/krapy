@@ -85,6 +85,7 @@ highest seen.
 | 0x20 | d->p | Touch | action u8 (0 down, 1 move, 2 up), pointer u8, x u16, y u16 (video pixels) |
 | 0x21 | d->p | Key | code u8 (1 back, 2 home, 3 recents, 4 power) |
 | 0x22 | d->p | Text | utf8 |
+| 0x30 | p->d | VideoChunk | same body as the UDP Video datagram, data up to 32 KiB |
 | 0x7f | both | Bye | - |
 
 ## UDP datagrams (plaintext after opening)
@@ -104,16 +105,25 @@ The phone sends `Keepalive` right after `Start` and then every second so the
 desktop learns its UDP address and hotspot NAT stays open. The desktop sends
 `Ping` every 250 ms.
 
+When the phone connects to a loopback address (USB through `adb reverse`,
+which only tunnels TCP) it sends video as `VideoChunk` on the TCP connection
+instead of UDP, and skips `Keepalive`.
+
+Every keyframe carries SPS/PPS in front of the IDR. The desktop also keeps
+the last SPS/PPS and adds them to an IDR that arrives without them.
+
 ## Late frames
 
 The desktop never waits for a frame older than the newest complete one.
-Incomplete older frames are dropped. After a loss on a non-keyframe the
-decoder waits for the next keyframe and the desktop sends `Keyframe`
-(at most every 500 ms).
+Incomplete older frames are dropped. Complete frames are decoded in order;
+if three or more pile up the desktop drops them and waits for a keyframe
+instead of falling behind. Codec config is never dropped. After a loss or a
+decode error the decoder waits for the next keyframe and the desktop sends
+`Keyframe` (at most every 300 ms). The phone encodes a keyframe every second.
 
 ## Liveness
 
-No UDP from the phone for 3 s, or the TCP connection closing, ends the
+Nothing from the phone for 3 s, or the TCP connection closing, ends the
 session. The phone reconnects with backoff 250 ms doubling to 4 s, trying
 the last host first and then mDNS.
 
