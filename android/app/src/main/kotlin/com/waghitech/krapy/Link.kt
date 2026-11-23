@@ -53,6 +53,13 @@ class Link(
 
     fun isConnected(): Boolean = connected.get()
 
+    // adb can only tunnel tcp, so a loopback peer means usb: video goes over the tcp link
+    @Volatile
+    var videoOverTcp: Boolean = false
+        private set
+
+    fun maxChunk(): Int = if (videoOverTcp) Wire.MAX_TCP_VIDEO else Wire.MAX_VIDEO_DATA
+
     fun peer(): Peer = peer
 
     fun updatePeer(p: Peer) {
@@ -69,8 +76,10 @@ class Link(
         closeTransport()
         transportStop.set(false)
         lastError = null
+        videoOverTcp = isLoopback(h)
         try {
             val socket = Socket()
+            if (videoOverTcp) socket.sendBufferSize = 128 * 1024
             socket.connect(InetSocketAddress(h, p), 2000)
             socket.tcpNoDelay = true
             val inp = BufferedInputStream(socket.getInputStream())
@@ -137,8 +146,10 @@ class Link(
             connected.set(true)
             lastPingMs.set(System.currentTimeMillis())
             startReaderThreads()
-            startKeepalive()
-            startPingWatch()
+            if (!videoOverTcp) {
+                startKeepalive()
+                startPingWatch()
+            }
             peer = peer.copy(host = h, port = p)
             return true
         } catch (e: Exception) {
@@ -147,6 +158,9 @@ class Link(
             return false
         }
     }
+
+    private fun isLoopback(h: String): Boolean =
+        h == "127.0.0.1" || h == "localhost" || h == "::1"
 
     private fun describe(e: Exception, h: String, p: Int): String = when (e) {
         is java.net.ConnectException -> "nothing listening at $h:$p (is krapy running on the PC? firewall?)"
@@ -170,6 +184,10 @@ class Link(
         len: Int,
     ) {
         if (!connected.get()) return
+        if (videoOverTcp) {
+            sendTcpSealedDirect(Wire.encodeVideoChunk(frameId, idx, count, flags, captureUs, data, off, len))
+            return
+        }
         val seal = udpSeal ?: return
         val dg = udp ?: return
         val bodyLen = 18 + len

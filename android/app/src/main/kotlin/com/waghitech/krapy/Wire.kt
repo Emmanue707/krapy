@@ -13,6 +13,7 @@ object Wire {
     const val VIDEO_FLAG_CODEC_CONFIG: Int = 1 shl 1
 
     const val MAX_VIDEO_DATA: Int = 1100
+    const val MAX_TCP_VIDEO: Int = 32 * 1024
 
     fun encodeTcpFrame(body: ByteArray): ByteArray {
         val out = ByteArray(2 + body.size)
@@ -84,6 +85,29 @@ object Wire {
         data class Key(val code: Int) : Control()
         data class Text(val text: String) : Control()
         data object Bye : Control()
+    }
+
+    // video over tcp (control 0x30), same header as the udp video datagram
+    fun encodeVideoChunk(
+        frameId: Int,
+        idx: Int,
+        count: Int,
+        flags: Int,
+        captureUs: Long,
+        data: ByteArray,
+        off: Int,
+        len: Int,
+    ): ByteArray {
+        require(len <= MAX_TCP_VIDEO)
+        val b = ByteBuffer.allocate(18 + len).order(ByteOrder.BIG_ENDIAN)
+        b.put(0x30.toByte())
+        b.putInt(frameId)
+        b.putShort(idx.toShort())
+        b.putShort(count.toShort())
+        b.put(flags.toByte())
+        b.putLong(captureUs)
+        b.put(data, off, len)
+        return b.array()
     }
 
     fun encodeControl(c: Control): ByteArray = when (c) {
