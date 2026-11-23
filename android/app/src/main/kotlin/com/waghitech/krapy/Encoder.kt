@@ -8,7 +8,6 @@ import android.os.Bundle
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -61,7 +60,7 @@ class Encoder(
             ?: throw IllegalStateException("encoder: no input surface")
         codec?.start()
         stop.set(false)
-        drainThread = thread(name = "krapy-enc", isDaemon = true) { drainLoop() }
+        drainThread = Workers.start("krapy-enc") { drainLoop() }
     }
 
     fun stop() {
@@ -113,7 +112,7 @@ class Encoder(
             ?: throw IllegalStateException("encoder: no input surface")
         codec?.start()
         stop.set(false)
-        drainThread = thread(name = "krapy-enc", isDaemon = true) { drainLoop() }
+        drainThread = Workers.start("krapy-enc") { drainLoop() }
     }
 
     fun requestKeyframe() {
@@ -141,7 +140,7 @@ class Encoder(
             ?: throw IllegalStateException("encoder: no input surface")
         codec?.start()
         stop.set(false)
-        drainThread = thread(name = "krapy-enc", isDaemon = true) { drainLoop() }
+        drainThread = Workers.start("krapy-enc") { drainLoop() }
         fps = f
         bitrate = br
         link.sendFormat(width, height)

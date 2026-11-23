@@ -13,7 +13,6 @@ import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.concurrent.thread
 
 interface LinkCallbacks {
     fun onControl(c: Wire.Control)
@@ -182,7 +181,7 @@ class Link(
     fun sendTcpSealed(plaintext: ByteArray) {
         if (!connected.get()) return
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            tcpSender.execute { sendTcpSealedDirect(plaintext) }
+            tcpSender.execute { Workers.guard("krapy-tcp-send") { sendTcpSealedDirect(plaintext) } }
             return
         }
         sendTcpSealedDirect(plaintext)
@@ -260,12 +259,12 @@ class Link(
     }
 
     private fun startReaderThreads() {
-        tcpThread = thread(name = "krapy-tcp", isDaemon = true) { tcpLoop() }
-        udpThread = thread(name = "krapy-udp", isDaemon = true) { udpLoop() }
+        tcpThread = Workers.start("krapy-tcp") { tcpLoop() }
+        udpThread = Workers.start("krapy-udp") { udpLoop() }
     }
 
     private fun startKeepalive() {
-        keepaliveThread = thread(name = "krapy-ka", isDaemon = true) {
+        keepaliveThread = Workers.start("krapy-ka") {
             while (!transportStop.get() && !halt.get()) {
                 try {
                     Thread.sleep(1000)
@@ -280,7 +279,7 @@ class Link(
     }
 
     private fun startPingWatch() {
-        pingWatchThread = thread(name = "krapy-ping", isDaemon = true) {
+        pingWatchThread = Workers.start("krapy-ping") {
             while (!transportStop.get() && !halt.get()) {
                 try {
                     Thread.sleep(500)
