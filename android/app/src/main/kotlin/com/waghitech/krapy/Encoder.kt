@@ -8,24 +8,31 @@ import android.os.Bundle
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 class Encoder(
     private val link: Link,
-    private val captureBaseNs: Long,
 ) {
     private var codec: MediaCodec? = null
     private var drainThread: Thread? = null
     private val stop = AtomicBoolean(false)
     private var width: Int = 0
     private var height: Int = 0
-    private var fps: Int = 30
-    private var bitrate: Int = 4_000_000
-    private var maxSize: Int = 1280
+    private var fps: Int = 60
+    private var bitrate: Int = 12_000_000
+    private var maxSize: Int = 1920
     private var frameId: Int = 0
     private val chunkBuf = ByteArray(Wire.MAX_TCP_VIDEO)
+    private var drainBuf = ByteArray(64 * 1024)
+    private var mergeBuf = ByteArray(64 * 1024)
+    private var encAvgUs: Int = 0
+    private var encMaxUs: Int = 0
+    private var encWindowFrames: Int = 0
+    private var encWindowSumUs: Long = 0
+    private var encWindowMaxUs: Int = 0
     @Volatile
     private var codecConfig: ByteArray? = null
     @Volatile
@@ -178,11 +185,18 @@ class Encoder(
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
         if (rich) {
             format.setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                format.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                try {
+                    format.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+                } catch (_: Exception) {
+                }
+                try {
+                    format.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                } catch (_: Exception) {
+                }
             }
             format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
@@ -201,6 +215,14 @@ class Encoder(
             }
             trySetProfile(format)
             trySetLowLatency(format)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                    format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                    format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                } catch (_: Exception) {
+                }
+            }
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -213,10 +235,11 @@ class Encoder(
                 MediaFormat.KEY_PROFILE,
                 MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline,
             )
-            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel42)
         } catch (_: Exception) {
             try {
                 format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
             } catch (_: Exception) {
             }
         }
@@ -240,7 +263,7 @@ class Encoder(
         val c = codec ?: return
         while (!stop.get()) {
             val idx = try {
-                c.dequeueOutputBuffer(info, 5_000)
+                c.dequeueOutputBuffer(info, 10_000)
             } catch (_: Exception) {
                 break
             }
@@ -257,16 +280,16 @@ class Encoder(
                     val size = info.size
                     if (size > 0) {
                         val flags = mediaFlags(info.flags)
-                        val data = ByteArray(size)
+                        if (drainBuf.size < size) drainBuf = ByteArray(size + size / 2)
+                        val data = drainBuf
                         out.position(info.offset)
                         out.limit(info.offset + size)
-                        out.get(data)
+                        out.get(data, 0, size)
                         val captureUs = captureUs(info.presentationTimeUs)
                         if (flags and Wire.VIDEO_FLAG_CODEC_CONFIG != 0) {
-                            // kept and sent in front of every keyframe instead
-                            codecConfig = data
+                            codecConfig = data.copyOf(size)
                         } else {
-                            sendFrame(data, flags, captureUs)
+                            sendFrame(data, size, flags, captureUs)
                         }
                     }
                     c.releaseOutputBuffer(idx, false)
@@ -275,30 +298,50 @@ class Encoder(
         }
     }
 
-    private fun sendFrame(data: ByteArray, flags: Int, captureUs: Long) {
+    private fun sendFrame(data: ByteArray, len: Int, flags: Int, captureUs: Long) {
+        val encUs = ((System.nanoTime() / 1000) - captureUs).toInt().coerceAtLeast(0)
+        encWindowFrames++
+        encWindowSumUs += encUs
+        if (encUs > encWindowMaxUs) encWindowMaxUs = encUs
         val cfg = codecConfig
-        if (flags and Wire.VIDEO_FLAG_KEYFRAME != 0 && cfg != null && !Annex.hasSps(data)) {
-            sendOneFrame(cfg + data, flags, captureUs)
+        if (flags and Wire.VIDEO_FLAG_KEYFRAME != 0 && cfg != null && !Annex.hasSps(data, len)) {
+            val total = cfg.size + len
+            if (mergeBuf.size < total) mergeBuf = ByteArray(total + total / 2)
+            System.arraycopy(cfg, 0, mergeBuf, 0, cfg.size)
+            System.arraycopy(data, 0, mergeBuf, cfg.size, len)
+            sendOneFrame(mergeBuf, total, flags, captureUs)
         } else {
-            sendOneFrame(data, flags, captureUs)
+            sendOneFrame(data, len, flags, captureUs)
         }
     }
 
-    private fun sendOneFrame(data: ByteArray, flags: Int, captureUs: Long) {
+    private fun sendOneFrame(data: ByteArray, len: Int, flags: Int, captureUs: Long) {
         val id = frameId
         val chunk = link.maxChunk()
-        val count = (data.size + chunk - 1) / chunk
+        val count = (len + chunk - 1) / chunk
         var off = 0
         var idx = 0
-        while (off < data.size) {
-            val len = min(chunk, data.size - off)
-            System.arraycopy(data, off, chunkBuf, 0, len)
-            link.sendVideo(id, idx, count, flags, captureUs, chunkBuf, 0, len)
-            off += len
+        while (off < len) {
+            val part = min(chunk, len - off)
+            System.arraycopy(data, off, chunkBuf, 0, part)
+            link.sendVideo(id, idx, count, flags, captureUs, chunkBuf, 0, part)
+            off += part
             idx++
         }
         frameId++
     }
+
+    fun drainEncoderStatsWindow() {
+        if (encWindowFrames > 0) {
+            encAvgUs = (encWindowSumUs / encWindowFrames).toInt()
+            encMaxUs = encWindowMaxUs
+        }
+        encWindowFrames = 0
+        encWindowSumUs = 0
+        encWindowMaxUs = 0
+    }
+
+    fun encoderStats(): Triple<Int, Int, Int> = Triple(encAvgUs, encMaxUs, fps)
 
     private fun mediaFlags(codecFlags: Int): Int {
         var f = 0
@@ -311,9 +354,10 @@ class Encoder(
         return f
     }
 
+    // surface timestamps are already System.nanoTime based
     private fun captureUs(presentationUs: Long): Long {
-        val deltaNs = presentationUs * 1000L
-        return (captureBaseNs + deltaNs) / 1000L
+        val nowUs = System.nanoTime() / 1000
+        return if (abs(nowUs - presentationUs) < 5_000_000) presentationUs else nowUs
     }
 
     private fun annexB(csd0: ByteBuffer, csd1: ByteBuffer?): ByteArray {

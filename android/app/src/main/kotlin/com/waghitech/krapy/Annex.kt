@@ -1,9 +1,9 @@
 package com.waghitech.krapy
 
 object Annex {
-    fun hasSps(data: ByteArray): Boolean {
+    fun hasSps(data: ByteArray, len: Int = data.size): Boolean {
         var i = 0
-        val n = data.size
+        val n = len
         while (i + 3 < n) {
             if (data[i].toInt() == 0 && data[i + 1].toInt() == 0) {
                 if (data[i + 2].toInt() == 1) {
