@@ -82,7 +82,7 @@ class MainActivity : Activity() {
         }
         root.addView(remoteBlock)
         pairedLabel = TextView(this).apply {
-            text = "paired desktops"
+            text = "paired desktops · tap to mirror, hold to forget"
             textSize = 12f
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(textSecondary())
@@ -271,11 +271,13 @@ class MainActivity : Activity() {
 
     private fun refreshStatus() {
         val mirroring = MirrorService.activePeerName
-        statusLine.text = when {
+        val base = when {
             mirroring != null -> "mirroring to $mirroring"
             peerRows.isNotEmpty() -> "paired (${peerRows.size} desktop${if (peerRows.size == 1) "" else "s"})"
             else -> "idle"
         }
+        val problem = MirrorService.lastProblem
+        statusLine.text = if (problem != null) "$base\n$problem" else base
     }
 
     private fun uiPrefs() = getSharedPreferences(PREFS_UI, Context.MODE_PRIVATE)
