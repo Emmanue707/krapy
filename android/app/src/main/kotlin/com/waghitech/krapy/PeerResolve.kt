@@ -97,10 +97,15 @@ class PeerResolve(private val context: Context) {
         } catch (_: Exception) {
             return null
         }
-        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         try {
-            nsd.stopServiceDiscovery(listener)
-        } catch (_: Exception) {
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            try {
+                nsd.stopServiceDiscovery(listener)
+            } catch (_: Exception) {
+            }
         }
         return result.get()
     }
@@ -137,22 +142,14 @@ class PeerResolve(private val context: Context) {
             storedPort: Int,
             desktopId: String,
         ): Pair<String, Int>? {
-            val found = AtomicReference<Pair<String, Int>?>(null)
-            val done = CountDownLatch(1)
-            fun win(h: String, p: Int) {
-                if (found.compareAndSet(null, h to p)) done.countDown()
-            }
-            val t1 = kotlin.concurrent.thread {
-                if (probeTcp(storedHost, storedPort)) win(storedHost, storedPort)
-            }
-            val t2 = kotlin.concurrent.thread {
-                val r = PeerResolve(context).resolve(desktopId, 5000)
-                if (r != null && probeTcp(r.first, r.second)) win(r.first, r.second)
-            }
-            done.await(6, TimeUnit.SECONDS)
-            t1.interrupt()
-            t2.interrupt()
-            return found.get()
+            return Workers.race(
+                6000,
+                { if (probeTcp(storedHost, storedPort)) storedHost to storedPort else null },
+                {
+                    val r = PeerResolve(context).resolve(desktopId, 5000)
+                    if (r != null && probeTcp(r.first, r.second)) r else null
+                },
+            )
         }
     }
 }
