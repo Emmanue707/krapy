@@ -96,11 +96,22 @@
     <section aria-labelledby="fast-heading">
       <h2 id="fast-heading">Why it is fast</h2>
       <ul class="fast-list">
-        <li>Hardware H.264 encode on the phone.</li>
-        <li>UDP video with late frames dropped instead of piling up.</li>
-        <li>At most one frame queued on either side.</li>
-        <li>GPU YUV conversion on the desktop.</li>
-        <li>Adaptive bitrate: steps down quickly on loss, ramps up slowly when the link is clean.</li>
+        <li>Hardware H.264 encode on the phone, with Wi-Fi power saving held off while mirroring.</li>
+        <li>Small UDP packets marked for low delay; late frames are dropped instead of piling up.</li>
+        <li>Lost frames are recovered with a fresh keyframe within a few hundred milliseconds.</li>
+        <li>GPU color conversion with the stream&apos;s own color range, so it looks like the phone.</li>
+        <li>Adaptive bitrate that backs off gently on a bad link and climbs back when it clears.</li>
+        <li><code>krapy connect -v</code> shows the delay split into phone, network and decode.</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="connected-heading">
+      <h2 id="connected-heading">While connected</h2>
+      <ul class="fast-list">
+        <li>Sound on PC: send the phone&apos;s audio to the computer, or keep it on the phone.</li>
+        <li>Pause and resume, Smooth / Balanced / Sharp quality, and disconnect, from the app or the notification.</li>
+        <li>Keep the phone screen awake, clipboard sync on or off, and live fps, delay and bitrate.</li>
+        <li>Rotate the PC view from the phone or with Ctrl+R.</li>
       </ul>
     </section>
 
@@ -118,20 +129,20 @@
           </thead>
           <tbody>
             <tr>
-              <th scope="row">High quality</th>
-              <td>16 Mbps</td>
+              <th scope="row">High quality (Sharp)</th>
+              <td>20 Mbps</td>
+              <td>60</td>
+              <td>2560</td>
+            </tr>
+            <tr>
+              <th scope="row">Balanced</th>
+              <td>12 Mbps</td>
               <td>60</td>
               <td>1920</td>
             </tr>
             <tr>
-              <th scope="row">Balanced</th>
-              <td>8 Mbps</td>
-              <td>60</td>
-              <td>1600</td>
-            </tr>
-            <tr>
-              <th scope="row">Low latency</th>
-              <td>4 Mbps</td>
+              <th scope="row">Low latency (Smooth)</th>
+              <td>6 Mbps</td>
               <td>60</td>
               <td>1280</td>
             </tr>
