@@ -62,6 +62,18 @@
       </div>
     </section>
 
+    <section aria-labelledby="usb-heading">
+      <h2 id="usb-heading">Connect with USB (adb)</h2>
+      <p>No sudo needed to run krapy on the desktop.</p>
+      <ol class="steps">
+        <li>Install adb: <code>sudo dnf install android-tools</code> (Fedora) or <code>sudo apt install adb</code> (Ubuntu/Debian).</li>
+        <li>On the phone: Settings &gt; About phone &gt; tap Build number 7 times, then Developer options &gt; USB debugging on.</li>
+        <li>Plug the phone in and tap Allow on the &quot;Allow USB debugging?&quot; prompt.</li>
+        <li>Run <code>krapy connect --usb</code> and tap Start now on the phone.</li>
+      </ol>
+      <p>Wireless debugging: <code>krapy adb pair &lt;ip:port&gt; &lt;code&gt;</code> then <code>krapy connect --usb</code>.</p>
+    </section>
+
     <section aria-labelledby="how-heading">
       <h2 id="how-heading">How it works</h2>
       <ol class="steps">

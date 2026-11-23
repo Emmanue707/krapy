@@ -114,9 +114,22 @@ krapy list                      # paired phones, adb devices
 krapy alias <device> <name>
 krapy forget <device>
 krapy pair --adb [serial]       # send the pairing link over adb, no scan
+krapy connect --usb [--serial S]  # one-command USB mirroring (adb reverse)
+krapy adb                         # same as connect --usb
 krapy adb pair <host:port> <code>
 krapy adb connect <host:port>
 ```
+
+## Connect with USB (adb)
+
+You do not need sudo to run krapy.
+
+1. Install adb: `sudo dnf install android-tools` (Fedora) or `sudo apt install adb` (Ubuntu/Debian)
+2. On the phone: Settings > About phone > tap Build number 7 times, then Developer options > USB debugging on
+3. Plug the phone in and tap Allow on the "Allow USB debugging?" prompt
+4. Run `krapy connect --usb` and tap Start now on the phone
+
+Wireless debugging: `krapy adb pair <ip:port> <code>` then `krapy connect --usb` (adb reverse works over wireless adb too).
 
 Useful flags: `--preset high-quality|balanced|low-latency|hotspot`,
 `--bitrate`, `--fps`, `--max-size`, `--decoder ffmpeg|openh264`, `--stats`,
