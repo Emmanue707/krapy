@@ -1369,7 +1369,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "krapy-audio"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "cpal",
  "krapy-transport",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "krapy-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "krapy-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "directories",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "krapy-decode"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "ffmpeg-next",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "krapy-render"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "krapy-transport"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "bytes",
