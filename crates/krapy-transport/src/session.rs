@@ -1,13 +1,15 @@
 use crate::crypto::{CryptoError, Opener, Sealer, SessionKeys, pair_secret};
-use crate::reassembly::{CompleteFrame, Reassembler};
+use crate::queue::FrameQueue;
+use crate::reassembly::Reassembler;
 use crate::stats::NetWindow;
 use crate::wire::{
     self, Control, Datagram, Hello, WireError, decode_control, encode_control,
     encode_datagram_body, encode_tcp_frame, encode_welcome,
 };
+use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -16,7 +18,17 @@ use std::time::{Duration, Instant};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PING_INTERVAL: Duration = Duration::from_millis(250);
 const UDP_SILENCE: Duration = Duration::from_secs(3);
-const KEYFRAME_MIN: Duration = Duration::from_millis(500);
+const KEYFRAME_MIN: Duration = Duration::from_millis(300);
+
+const END_NONE: u8 = 0;
+const END_PHONE_CLOSED: u8 = 1;
+const END_TCP_ERROR: u8 = 2;
+const END_SILENT: u8 = 3;
+const END_BYE: u8 = 4;
+
+fn set_end(end: &AtomicU8, why: u8) {
+    let _ = end.compare_exchange(END_NONE, why, Ordering::Relaxed, Ordering::Relaxed);
+}
 
 #[derive(Debug)]
 pub enum SessionError {
@@ -34,32 +46,11 @@ impl From<io::Error> for SessionError {
     }
 }
 
-pub struct LatestFrame {
-    slot: Mutex<Option<CompleteFrame>>,
-}
-
-impl LatestFrame {
-    fn new() -> Self {
-        Self {
-            slot: Mutex::new(None),
-        }
-    }
-
-    pub fn take(&self) -> Option<CompleteFrame> {
-        self.slot.lock().ok().and_then(|mut g| g.take())
-    }
-
-    fn publish(&self, frame: CompleteFrame) {
-        if let Ok(mut g) = self.slot.lock() {
-            *g = Some(frame);
-        }
-    }
-}
-
 pub struct Session {
     pub control_tx: Sender<Control>,
     pub control_rx: Option<Receiver<Control>>,
-    pub frames: Arc<LatestFrame>,
+    pub frames: Arc<FrameQueue>,
+    end: Arc<AtomicU8>,
     pub stats_window: Arc<Mutex<NetWindow>>,
     stop: Arc<AtomicBool>,
     handles: Mutex<Option<Vec<JoinHandle<()>>>>,
@@ -78,6 +69,16 @@ impl Session {
 
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    pub fn end_reason(&self) -> &'static str {
+        match self.end.load(Ordering::Relaxed) {
+            END_PHONE_CLOSED => "the phone closed the connection",
+            END_TCP_ERROR => "connection error",
+            END_SILENT => "nothing from the phone for 3s",
+            END_BYE => "the phone stopped mirroring",
+            _ => "stopped",
+        }
     }
 
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
@@ -184,7 +185,8 @@ impl Listener {
         let (control_out, control_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let (auto_tx, auto_rx) = mpsc::channel();
-        let frames = Arc::new(LatestFrame::new());
+        let frames = Arc::new(FrameQueue::new());
+        let end = Arc::new(AtomicU8::new(END_NONE));
         let stats_window = Arc::new(Mutex::new(NetWindow::new()));
 
         let _ = stream.set_nodelay(true);
@@ -193,6 +195,14 @@ impl Listener {
 
         let tcp_h = {
             let stop = Arc::clone(&stop);
+            let tcp_video = TcpVideo {
+                frames: Arc::clone(&frames),
+                last_in: Arc::clone(&last_udp),
+                auto_tx: auto_tx.clone(),
+                reasm: Reassembler::new(),
+                last_key_req: Instant::now() - KEYFRAME_MIN,
+            };
+            let end = Arc::clone(&end);
             thread::spawn(move || {
                 tcp_loop(
                     stream,
@@ -201,7 +211,9 @@ impl Listener {
                     control_in,
                     auto_rx,
                     control_out,
+                    tcp_video,
                     stop,
+                    end,
                 )
             })
         };
@@ -232,7 +244,8 @@ impl Listener {
         let watch_h = {
             let last_udp = Arc::clone(&last_udp);
             let stop = Arc::clone(&stop);
-            thread::spawn(move || watch_loop(last_udp, stop))
+            let end = Arc::clone(&end);
+            thread::spawn(move || watch_loop(last_udp, stop, end))
         };
 
         let stop_tx = stop;
@@ -240,6 +253,7 @@ impl Listener {
             control_tx,
             control_rx: Some(control_rx),
             frames,
+            end,
             stats_window,
             stop: stop_tx,
             handles: Mutex::new(Some(vec![tcp_h, udp_h, watch_h])),
@@ -287,6 +301,54 @@ fn read_sealed_start(stream: &mut TcpStream, keys: &SessionKeys) -> Result<Contr
     decode_control(&pt).map_err(SessionError::Wire)
 }
 
+struct TcpVideo {
+    frames: Arc<FrameQueue>,
+    last_in: Arc<Mutex<LastUdp>>,
+    auto_tx: Sender<Control>,
+    reasm: Reassembler,
+    last_key_req: Instant,
+}
+
+impl TcpVideo {
+    fn touch(&self) {
+        if let Ok(mut t) = self.last_in.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    fn ingest(&mut self, c: &Control) {
+        let Control::VideoChunk {
+            frame_id,
+            idx,
+            count,
+            flags,
+            capture_us,
+            data,
+        } = c
+        else {
+            return;
+        };
+        let dg = Datagram::Video {
+            frame_id: *frame_id,
+            idx: *idx,
+            count: *count,
+            flags: *flags,
+            capture_us: *capture_us,
+            data: Cow::Borrowed(data),
+        };
+        let mut want_key = false;
+        if let Some(cf) = self.reasm.ingest(&dg) {
+            want_key = self.frames.push(cf);
+        }
+        if (want_key || self.reasm.keyframe_wanted()) && self.last_key_req.elapsed() >= KEYFRAME_MIN
+        {
+            let _ = self.auto_tx.send(Control::Keyframe);
+            self.last_key_req = Instant::now();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tcp_loop(
     mut stream: TcpStream,
     read_key: [u8; 32],
@@ -294,7 +356,9 @@ fn tcp_loop(
     user_in: Receiver<Control>,
     auto_in: Receiver<Control>,
     out: Sender<Control>,
+    mut video: TcpVideo,
     stop: Arc<AtomicBool>,
+    end: Arc<AtomicU8>,
 ) {
     let writer = match stream.try_clone() {
         Ok(w) => Arc::new(Mutex::new((w, Sealer::new(&write_key)))),
@@ -321,18 +385,24 @@ fn tcp_loop(
 
     let mut opener = Opener::new(&read_key);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-    let mut pending = Vec::with_capacity(4096);
-    let mut buf = [0u8; 4096];
+    let mut pending = Vec::with_capacity(64 * 1024);
+    let mut buf = vec![0u8; 64 * 1024];
     while !stop.load(Ordering::Relaxed) {
         match stream.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                set_end(&end, END_PHONE_CLOSED);
+                break;
+            }
             Ok(n) => pending.extend_from_slice(&buf[..n]),
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
                 continue;
             }
-            Err(_) => break,
+            Err(_) => {
+                set_end(&end, END_TCP_ERROR);
+                break;
+            }
         }
         while pending.len() >= 2 {
             let len = u16::from_be_bytes([pending[0], pending[1]]) as usize;
@@ -342,7 +412,15 @@ fn tcp_loop(
             if let Ok(pt) = opener.open_tcp(&pending[2..2 + len])
                 && let Ok(msg) = decode_control(&pt)
             {
-                let _ = out.send(msg);
+                video.touch();
+                if matches!(msg, Control::VideoChunk { .. }) {
+                    video.ingest(&msg);
+                } else {
+                    if matches!(msg, Control::Bye) {
+                        set_end(&end, END_BYE);
+                    }
+                    let _ = out.send(msg);
+                }
             }
             pending.drain(..2 + len);
         }
@@ -366,7 +444,7 @@ fn udp_loop(
     out_key: [u8; 32],
     phone_addr: Arc<Mutex<Option<SocketAddr>>>,
     last_udp: Arc<Mutex<LastUdp>>,
-    frames: Arc<LatestFrame>,
+    frames: Arc<FrameQueue>,
     stats: Arc<Mutex<NetWindow>>,
     auto_tx: Sender<Control>,
     stop: Arc<AtomicBool>,
@@ -377,6 +455,7 @@ fn udp_loop(
     let mut last_keyframe = Instant::now() - KEYFRAME_MIN;
     let mut last_ping = Instant::now() - PING_INTERVAL;
     let mut ping_id: u32 = 0;
+    let mut queue_wants_key = false;
     let epoch = Instant::now();
     let mut buf = [0u8; 2048];
     loop {
@@ -435,7 +514,9 @@ fn udp_loop(
                             {
                                 nw.note_frame_completed();
                             }
-                            frames.publish(cf);
+                            if frames.push(cf) {
+                                queue_wants_key = true;
+                            }
                         }
                         let new_drops = reasm.stats().frames_dropped;
                         if new_drops > prev_drops {
@@ -460,7 +541,10 @@ fn udp_loop(
                     }
                     Datagram::Keepalive | Datagram::Ping { .. } => {}
                 }
-                if reasm.keyframe_wanted() && last_keyframe.elapsed() >= KEYFRAME_MIN {
+                if (reasm.keyframe_wanted() || queue_wants_key)
+                    && last_keyframe.elapsed() >= KEYFRAME_MIN
+                {
+                    queue_wants_key = false;
                     let _ = auto_tx.send(Control::Keyframe);
                     last_keyframe = Instant::now();
                 }
@@ -509,7 +593,7 @@ fn send_udp(
     udp.send_to(&wire, addr).map(|_| ()).map_err(|_| ())
 }
 
-fn watch_loop(last_udp: Arc<Mutex<LastUdp>>, stop: Arc<AtomicBool>) {
+fn watch_loop(last_udp: Arc<Mutex<LastUdp>>, stop: Arc<AtomicBool>, end: Arc<AtomicU8>) {
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -520,6 +604,7 @@ fn watch_loop(last_udp: Arc<Mutex<LastUdp>>, stop: Arc<AtomicBool>) {
             .map(|t| t.elapsed() > UDP_SILENCE)
             .unwrap_or(false);
         if silent {
+            set_end(&end, END_SILENT);
             stop.store(true, Ordering::Relaxed);
             break;
         }
@@ -631,7 +716,7 @@ mod tests {
 
         let mut f1 = None;
         for _ in 0..50 {
-            if let Some(f) = session.frames.take() {
+            if let Some(f) = session.frames.pop() {
                 f1 = Some(f);
                 break;
             }
