@@ -113,6 +113,88 @@ pub fn connect(host_port: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn reverse(serial: &str, local_port: u16, remote_port: u16) -> Result<()> {
+    let local = format!("tcp:{local_port}");
+    let remote = format!("tcp:{remote_port}");
+    let out = run(
+        ["-s", serial, "reverse", local.as_str(), remote.as_str()],
+        RUN_TIMEOUT,
+    )?;
+    require_ok(out, "adb reverse")?;
+    Ok(())
+}
+
+pub fn reverse_remove(serial: &str, port: u16) -> Result<()> {
+    let spec = format!("tcp:{port}");
+    let out = run(
+        ["-s", serial, "reverse", "--remove", spec.as_str()],
+        RUN_TIMEOUT,
+    )?;
+    require_ok(out, "adb reverse --remove")?;
+    Ok(())
+}
+
+pub const ADB_NOT_FOUND: &str = "adb not found. Fedora: sudo dnf install android-tools  (Ubuntu/Debian: sudo apt install adb, Windows/macOS: install Android platform-tools)";
+
+pub const USB_DEVICE_HELP: &str = "no usable adb device. steps:\n\
+1) Settings > About phone > tap Build number 7 times\n\
+2) Settings > Developer options > turn on USB debugging\n\
+3) Plug in the phone and tap Allow on \"Allow USB debugging?\"\n\
+4) Run this command again";
+
+pub fn require_on_path() -> Result<()> {
+    if on_path() {
+        Ok(())
+    } else {
+        bail!("{ADB_NOT_FOUND}");
+    }
+}
+
+pub fn wait_usb_device(preferred: Option<&str>) -> Result<String> {
+    if !on_path() {
+        bail!("{ADB_NOT_FOUND}");
+    }
+    if let Some(s) = preferred.filter(|s| !s.is_empty()) {
+        let devs = devices()?;
+        match devs.iter().find(|d| d.serial == *s) {
+            Some(d) if d.state == "device" => return Ok(s.to_string()),
+            Some(d) if d.state == "unauthorized" => bail!(
+                "adb device {s} is unauthorized — accept \"Allow USB debugging?\" on the phone\n{USB_DEVICE_HELP}"
+            ),
+            Some(d) if d.state == "offline" => {
+                bail!(
+                    "adb device {s} is offline — replug the cable or revoke USB debugging authorizations and try again"
+                )
+            }
+            Some(d) => bail!("adb device {s} is in state \"{}\"", d.state),
+            None => bail!("no adb device with serial {s}"),
+        }
+    }
+    let devs = devices()?;
+    if devs.is_empty() {
+        bail!("{USB_DEVICE_HELP}");
+    }
+    let ready: Vec<_> = devs.iter().filter(|d| d.state == "device").collect();
+    if ready.len() == 1 {
+        return Ok(ready[0].serial.clone());
+    }
+    if ready.len() > 1 {
+        bail!(
+            "{} adb devices in 'device' state — pass --serial",
+            ready.len()
+        );
+    }
+    if devs.iter().any(|d| d.state == "unauthorized") {
+        bail!(
+            "adb device unauthorized — accept \"Allow USB debugging?\" on the phone\n{USB_DEVICE_HELP}"
+        );
+    }
+    if devs.iter().any(|d| d.state == "offline") {
+        bail!("adb device offline — replug the cable or restart adb");
+    }
+    bail!("{USB_DEVICE_HELP}");
+}
+
 pub fn launch_app(serial: &str, uri: &str) -> Result<()> {
     let out = run(
         [
@@ -260,5 +342,14 @@ pixel-8    _adb-tls-connect._tcp    192.168.0.12:37124\n";
     #[test]
     fn parse_devices_skips_banner() {
         assert!(parse_devices_list("List of devices attached\n").is_empty());
+    }
+
+    #[test]
+    fn wait_usb_picks_lone_device() {
+        let devs = parse_devices_list(
+            "List of devices attached\nemulator-5554 device product:x model:y\n",
+        );
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].state, "device");
     }
 }
