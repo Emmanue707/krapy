@@ -18,7 +18,6 @@ import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -29,12 +28,12 @@ import android.view.Surface
 import android.view.WindowManager
 import android.widget.Toast
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.thread
 import kotlin.math.min
 
 class MirrorService : Service(), LinkCallbacks {
     private val running = AtomicBoolean(false)
     private val reconnecting = AtomicBoolean(false)
+    private val connecting = AtomicBoolean(false)
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var encoder: Encoder? = null
@@ -82,9 +81,11 @@ class MirrorService : Service(), LinkCallbacks {
                 stopSession("unknown peer")
                 return START_NOT_STICKY
             }
-            if (running.getAndSet(true)) {
-                stopSession("restarted")
+            if (running.get()) {
+                teardown()
             }
+            running.set(true)
+            lastProblem = null
             peer = p
             activePeerName = p.name
             peersDb = Peers(this)
@@ -96,6 +97,7 @@ class MirrorService : Service(), LinkCallbacks {
             val peers = Peers(this)
             val lk = Link(p, peers.phoneId(), peers.phoneName(), this)
             link = lk
+            connecting.set(true)
             val enc = Encoder(lk, captureBaseNs)
             encoder = enc
             startProjection(resultCode, data, enc)
@@ -112,24 +114,26 @@ class MirrorService : Service(), LinkCallbacks {
             SessionBridge.sendClipboard = { text ->
                 lk.sendTcpSealed(Wire.encodeControl(Wire.Control.Clipboard(text)))
             }
-            thread(name = "krapy-connect", isDaemon = true) {
-                if (!lk.connect(start)) {
+            Workers.start("krapy-connect") {
+                val ok = try {
+                    lk.connect(start)
+                } finally {
+                    if (link === lk) connecting.set(false)
+                }
+                if (!ok && link === lk) {
+                    val why = lk.lastError ?: "can't reach ${p.host}:${p.port}"
+                    problem("can't connect to ${p.name}: $why")
                     mainHandler.post {
-                        Toast.makeText(
-                            this,
-                            "can't reach ${p.host}:${p.port}. Same Wi-Fi? On the PC run krapy doctor (firewall)",
-                            Toast.LENGTH_LONG,
-                        ).show()
+                        Toast.makeText(this, "krapy: $why", Toast.LENGTH_LONG).show()
                     }
                     beginReconnect(immediate = false)
-                } else {
-                    reconnecting.set(false)
                 }
             }
             return START_NOT_STICKY
         } catch (t: Throwable) {
             val reason = t.message?.take(120) ?: t.javaClass.simpleName
             CrashLog.record(this, t, "start")
+            problem("couldn't start mirroring: $reason")
             mainHandler.post {
                 Toast.makeText(
                     this,
@@ -192,6 +196,7 @@ class MirrorService : Service(), LinkCallbacks {
     }
 
     override fun onLinkDown(reason: String) {
+        problem("lost ${peer?.name ?: "desktop"}: $reason")
         mainHandler.post {
             if (!running.get()) return@post
             beginReconnect(immediate = false)
@@ -210,14 +215,21 @@ class MirrorService : Service(), LinkCallbacks {
         cm.setPrimaryClip(ClipData.newPlainText("krapy", text))
     }
 
+    private fun problem(text: String) {
+        lastProblem = text
+        android.util.Log.w("krapy", text)
+    }
+
+    // one connect attempt at a time: the first connect or a single reconnect loop
+    @Synchronized
     private fun beginReconnect(immediate: Boolean) {
-        if (!running.get()) return
+        if (!running.get() || connecting.get()) return
         if (immediate) backoffMs = 250
+        if (reconnectThread?.isAlive == true && reconnecting.get()) return
         link?.closeTransport()
-        updateNotifReconnecting()
+        mainHandler.post { if (running.get()) updateNotifReconnecting() }
         reconnecting.set(true)
-        reconnectThread?.interrupt()
-        reconnectThread = thread(name = "krapy-reconn", isDaemon = true) {
+        reconnectThread = Workers.start("krapy-reconn") {
             reconnectLoop(immediate)
         }
     }
@@ -237,7 +249,9 @@ class MirrorService : Service(), LinkCallbacks {
             val enc = encoder ?: break
             val lk = link ?: break
             val endpoint = PeerResolve.raceEndpoint(applicationContext, p.host, p.port, p.id)
+            if (Thread.currentThread().isInterrupted) break
             if (endpoint == null) {
+                problem("can't find ${p.name} on this network (last seen at ${p.host}:${p.port})")
                 backoffMs = min(backoffMs * 2, 4000)
                 delay = backoffMs
                 continue
@@ -251,6 +265,7 @@ class MirrorService : Service(), LinkCallbacks {
                 codec = 1,
             )
             if (lk.connect(start, host, port)) {
+                lastProblem = null
                 peersDb?.updateEndpoint(p.id, host, port)
                 peer = p.copy(host = host, port = port)
                 backoffMs = 250
@@ -262,6 +277,7 @@ class MirrorService : Service(), LinkCallbacks {
                 }
                 return
             }
+            lk.lastError?.let { problem("can't connect to ${p.name}: $it") }
             backoffMs = min(backoffMs * 2, 4000)
             delay = backoffMs
         }
@@ -272,7 +288,7 @@ class MirrorService : Service(), LinkCallbacks {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                if (!running.get()) return
+                if (!running.get() || connecting.get()) return
                 val lk = link ?: return
                 if (!lk.isConnected()) beginReconnect(immediate = true)
             }
@@ -281,7 +297,7 @@ class MirrorService : Service(), LinkCallbacks {
                 network: Network,
                 caps: NetworkCapabilities,
             ) {
-                if (!running.get()) return
+                if (!running.get() || connecting.get()) return
                 val lk = link ?: return
                 if (!lk.isConnected() && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
                     beginReconnect(immediate = true)
@@ -290,7 +306,7 @@ class MirrorService : Service(), LinkCallbacks {
         }
         networkCallback = cb
         try {
-            cm.registerNetworkCallback(NetworkRequest.Builder().build(), cb)
+            cm.registerDefaultNetworkCallback(cb, mainHandler)
         } catch (_: Exception) {
         }
     }
@@ -307,7 +323,11 @@ class MirrorService : Service(), LinkCallbacks {
             throw IllegalStateException("projection: ${e.message}")
         } ?: throw IllegalStateException("projection denied")
         if (Build.VERSION.SDK_INT >= 34) {
-            val cb = object : MediaProjection.Callback() {}
+            val cb = object : MediaProjection.Callback() {
+                override fun onStop() {
+                    mainHandler.post { stopSession("screen capture stopped") }
+                }
+            }
             projectionCallback = cb
             proj.registerCallback(cb, mainHandler)
         }
@@ -394,9 +414,18 @@ class MirrorService : Service(), LinkCallbacks {
     }
 
     private fun stopSession(reason: String) {
-        if (!running.getAndSet(false)) {
+        if (!running.get()) {
             return
         }
+        teardown()
+        updateNotifStopped(reason)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun teardown() {
+        running.set(false)
+        connecting.set(false)
         activePeerName = null
         reconnecting.set(false)
         reconnectThread?.interrupt()
@@ -425,9 +454,6 @@ class MirrorService : Service(), LinkCallbacks {
         projectionCallback = null
         projection?.stop()
         projection = null
-        updateNotifStopped(reason)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     private fun startForegroundNotif(name: String, reconnect: Boolean) {
@@ -505,6 +531,9 @@ class MirrorService : Service(), LinkCallbacks {
 
         @Volatile
         var activePeerName: String? = null
+
+        @Volatile
+        var lastProblem: String? = null
 
         fun start(context: Context, peerId: String, resultCode: Int, data: Intent) {
             val i = Intent(context, MirrorService::class.java).apply {
