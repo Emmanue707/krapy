@@ -48,6 +48,7 @@ pub fn pair_qr_frame(uri: &str) -> anyhow::Result<Frame> {
         v,
         stride_y,
         stride_uv,
+        color: krapy_decode::ColorSpec::DEFAULT,
     })
 }
 

@@ -1,6 +1,6 @@
 use crate::gpu::Gpu;
 use crate::keys::{self, KEY_BACK, KEY_HOME};
-use crate::letterbox::{letterbox_viewport, window_to_video};
+use crate::letterbox::{display_scale, effective_video, letterbox_viewport, window_to_video};
 use crate::mailbox::{FrameSource, Wake};
 use krapy_decode::Frame;
 use krapy_transport::Control;
@@ -25,6 +25,7 @@ pub struct KrapyApp {
     sized: bool,
     last_frame: Option<Frame>,
     cursor: Option<(f32, f32)>,
+    rotation: u8,
 }
 
 impl KrapyApp {
@@ -41,6 +42,7 @@ impl KrapyApp {
             sized: false,
             last_frame: None,
             cursor: None,
+            rotation: 0,
         }
     }
 
@@ -63,38 +65,52 @@ impl KrapyApp {
         }
     }
 
+    fn size_window_to_frame(&mut self, width: u32, height: u32) {
+        if self.sized {
+            return;
+        }
+        let Some(w) = &self.window else {
+            return;
+        };
+        let monitor = w.current_monitor();
+        let target_h = monitor
+            .map(|m| m.size().height as f64 * 0.85)
+            .unwrap_or(720.0);
+        let aspect = width as f64 / height.max(1) as f64;
+        let w_log = target_h * aspect;
+        let _ = w.request_inner_size(LogicalSize::new(w_log, target_h));
+        self.sized = true;
+    }
+
     fn redraw(&mut self) {
         if let Some(frame) = self.source.take_frame() {
             self.last_frame = Some(frame);
         }
-        let Some(frame) = self.last_frame.as_ref() else {
+        let Some((fw, fh)) = self.last_frame.as_ref().map(|f| (f.width, f.height)) else {
             return;
         };
-        if self.video != Some((frame.width, frame.height)) {
-            self.video = Some((frame.width, frame.height));
-            if let Some(w) = &self.window
-                && !self.sized
-            {
-                let base = 480.0f64;
-                let w_log = base;
-                let h_log = base * frame.height as f64 / frame.width.max(1) as f64;
-                let _ = w.request_inner_size(LogicalSize::new(w_log, h_log));
-                self.sized = true;
-            }
+        if self.video != Some((fw, fh)) {
+            self.video = Some((fw, fh));
+            self.size_window_to_frame(fw, fh);
         }
         let metrics = self.win_metrics();
-        if let Some(gpu) = self.gpu.as_mut() {
+        let rot = self.rotation;
+        if let Some(gpu) = self.gpu.as_mut()
+            && let Some(frame) = self.last_frame.as_ref()
+        {
             gpu.upload(frame);
             if let Some((ww, wh, vw, vh)) = metrics {
-                let vp = letterbox_viewport(ww, wh, vw as f32, vh as f32);
-                let _ = gpu.draw(vp);
+                let (evw, evh) = effective_video(vw, vh, rot);
+                let vp = letterbox_viewport(ww, wh, evw, evh);
+                let scale = display_scale(vp.w, vp.h, vw as f32, vh as f32);
+                let _ = gpu.draw(vp, vw, vh, rot, scale);
             }
         }
     }
 
     fn pointer_at(&self, x: f32, y: f32) -> Option<(u16, u16)> {
         let (ww, wh, vw, vh) = self.win_metrics()?;
-        window_to_video(x, y, ww, wh, vw, vh)
+        window_to_video(x, y, ww, wh, vw, vh, self.rotation)
     }
 
     fn touch(&self, action: u8, x: u16, y: u16) {
@@ -133,6 +149,12 @@ impl ApplicationHandler<Wake> for KrapyApp {
                 }
             }
             Wake::PhoneClipboard => self.apply_phone_clipboard(),
+            Wake::Rotate => {
+                self.rotation = self.rotation.wrapping_add(1) & 3;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
         }
         let _ = event_loop;
     }
@@ -165,8 +187,17 @@ impl ApplicationHandler<Wake> for KrapyApp {
 }
 
 impl KrapyApp {
-    fn on_key(&self, event: KeyEvent) {
+    fn on_key(&mut self, event: KeyEvent) {
         if event.state != ElementState::Pressed || event.repeat {
+            return;
+        }
+        if self.modifiers.control_key()
+            && matches!(event.logical_key, Key::Character(ref s) if s.eq_ignore_ascii_case("r"))
+        {
+            self.rotation = self.rotation.wrapping_add(1) & 3;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
         if self.modifiers.control_key()

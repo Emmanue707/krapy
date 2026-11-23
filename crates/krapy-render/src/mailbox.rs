@@ -6,6 +6,7 @@ use winit::event_loop::EventLoopProxy;
 pub enum Wake {
     NewFrame,
     PhoneClipboard,
+    Rotate,
 }
 
 struct Inner {
@@ -44,6 +45,14 @@ impl FrameSource {
             && let Some(p) = guard.as_ref()
         {
             let _ = p.send_event(Wake::NewFrame);
+        }
+    }
+
+    pub fn request_rotate(&self) {
+        if let Ok(guard) = self.inner.proxy.lock()
+            && let Some(p) = guard.as_ref()
+        {
+            let _ = p.send_event(Wake::Rotate);
         }
     }
 
