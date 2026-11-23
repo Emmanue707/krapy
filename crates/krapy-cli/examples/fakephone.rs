@@ -373,7 +373,11 @@ fn main() -> Result<()> {
                 continue;
             };
             if let Datagram::Ping { id, t_us } = dg {
-                let pong = Datagram::Pong { id, t_us };
+                let pong = Datagram::Pong {
+                    id,
+                    t_us,
+                    phone_us: Some(t_us + 1000),
+                };
                 let body = match encode_datagram_body(&pong) {
                     Ok(b) => b,
                     Err(_) => continue,

@@ -14,7 +14,7 @@ use krapy_render::FrameSource;
 use krapy_transport::{AcceptMode, Control, FrameQueue, Listener, Session, SessionError};
 
 const PAIR_WINDOW: Duration = Duration::from_secs(300);
-const POLL: Duration = Duration::from_millis(1);
+const POLL: Duration = Duration::from_millis(50);
 const NET_TICK: Duration = Duration::from_millis(20);
 const KEY_RETRY: Duration = Duration::from_millis(300);
 const SMALL_STACK: usize = 256 * 1024;
@@ -84,6 +84,11 @@ struct Counters {
     lat_us: AtomicU64,
     lat_samples: AtomicU64,
     lat_max_us: AtomicU64,
+    total_us: AtomicU64,
+    total_samples: AtomicU64,
+    total_max_us: AtomicU64,
+    net_us: AtomicU64,
+    pipe_decode_us: AtomicU64,
 }
 
 impl Counters {
@@ -97,7 +102,20 @@ impl Counters {
             lat_us: AtomicU64::new(0),
             lat_samples: AtomicU64::new(0),
             lat_max_us: AtomicU64::new(0),
+            total_us: AtomicU64::new(0),
+            total_samples: AtomicU64::new(0),
+            total_max_us: AtomicU64::new(0),
+            net_us: AtomicU64::new(0),
+            pipe_decode_us: AtomicU64::new(0),
         }
+    }
+}
+
+fn preset_from_id(id: u8) -> Preset {
+    match id {
+        0 => Preset::LowLatency,
+        2 => Preset::HighQuality,
+        _ => Preset::Balanced,
     }
 }
 
@@ -222,12 +240,16 @@ fn drive_session(
 
     let stop = session.stop_flag();
     let control_rx = session.take_control_rx().context("control rx")?;
+    let epoch = Arc::new(Instant::now());
+    let phone_stats = session.phone_stats_cell();
+    let clock = session.clock_cell();
     let net = {
         let stats_win = Arc::clone(&session.stats_window);
         let control_tx = session.control_tx.clone();
         let source = source.clone();
         let stop = Arc::clone(&stop);
         let counters = Arc::clone(&counters);
+        let epoch = Arc::clone(&epoch);
         thread::Builder::new()
             .stack_size(SMALL_STACK)
             .spawn(move || {
@@ -239,6 +261,7 @@ fn drive_session(
                     source,
                     stop,
                     counters,
+                    epoch,
                 );
             })
             .expect("net thread")
@@ -251,8 +274,21 @@ fn drive_session(
         let decoder = opts.decoder.clone();
         let stop = Arc::clone(&stop);
         let counters = Arc::clone(&counters);
+        let phone_stats = Arc::clone(&phone_stats);
+        let clock = Arc::clone(&clock);
+        let epoch = Arc::clone(&epoch);
         thread::spawn(move || {
-            decode_loop(frames, control_tx, source, decoder, stop, counters);
+            decode_loop(
+                frames,
+                control_tx,
+                source,
+                decoder,
+                stop,
+                counters,
+                phone_stats,
+                clock,
+                epoch,
+            );
         })
     };
 
@@ -261,9 +297,11 @@ fn drive_session(
         let stats_win = Arc::clone(&session.stats_window);
         let frames = Arc::clone(&session.frames);
         let stop = Arc::clone(&stats_stop);
+        let phone_stats = Arc::clone(&phone_stats);
+        let clock = Arc::clone(&clock);
         thread::Builder::new()
             .stack_size(SMALL_STACK)
-            .spawn(move || stats_loop(counters, stats_win, frames, stop))
+            .spawn(move || stats_loop(counters, stats_win, frames, phone_stats, clock, stop))
             .expect("stats thread")
     });
 
@@ -291,14 +329,70 @@ fn network_loop(
     source: FrameSource,
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
+    epoch: Arc<Instant>,
 ) {
+    let mut last_stats = Instant::now();
+    let mut prev_out = 0u64;
+    let mut last_pause: Option<bool> = None;
     while !stop.load(Ordering::Relaxed) {
         while let Ok(msg) = control_rx.try_recv() {
-            if let Control::Clipboard { text } = msg {
-                source.phone_clipboard(text);
+            match msg {
+                Control::Clipboard { text } => source.phone_clipboard(text),
+                Control::PresetRequest { preset } => {
+                    let p = preset_from_id(preset);
+                    let q = p.quality();
+                    adaptive.set_ceiling(q);
+                    counters.bitrate.store(q.bitrate as u64, Ordering::Relaxed);
+                    let _ = control_tx.send(Control::Quality {
+                        bitrate: q.bitrate,
+                        fps: q.fps,
+                        max_size: q.max_size,
+                    });
+                }
+                Control::Paused { on } => {
+                    let paused = on != 0;
+                    match last_pause {
+                        Some(was) if was == paused => {}
+                        _ => {
+                            if paused {
+                                println!("paused");
+                            } else {
+                                println!("resumed");
+                            }
+                        }
+                    }
+                    last_pause = Some(paused);
+                }
+                _ => {}
             }
         }
         let now = Instant::now();
+        if last_stats.elapsed() >= Duration::from_secs(1) {
+            last_stats = now;
+            let out_now = counters.frames_out.load(Ordering::Relaxed);
+            let fps = out_now.saturating_sub(prev_out).min(u64::from(u8::MAX)) as u8;
+            prev_out = out_now;
+            let ds = counters.decode_samples.swap(0, Ordering::Relaxed).max(1);
+            let decode_ms =
+                (counters.decode_us.swap(0, Ordering::Relaxed) as f64 / ds as f64 / 1000.0) as u16;
+            let lat_samples = counters.lat_samples.swap(0, Ordering::Relaxed).max(1);
+            let latency_ms = (counters.lat_us.swap(0, Ordering::Relaxed) as f64
+                / lat_samples as f64
+                / 1000.0) as u16;
+            let loss_permille = stats_win
+                .lock()
+                .ok()
+                .and_then(|w| w.last())
+                .map(|n| (n.loss * 1000.0).round() as u16)
+                .unwrap_or(0);
+            let _ = control_tx.send(Control::DesktopStats {
+                fps,
+                latency_ms,
+                decode_ms,
+                loss_permille,
+            });
+            let _ = epoch;
+        }
         if let Ok(mut nw) = stats_win.lock()
             && let Some(net) = nw.tick(now)
             && let Some(q) = adaptive.on_window(net, now)
@@ -314,6 +408,7 @@ fn network_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_loop(
     frames: Arc<FrameQueue>,
     control_tx: Sender<Control>,
@@ -321,6 +416,9 @@ fn decode_loop(
     decoder: Option<String>,
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
+    phone_stats: Arc<Mutex<krapy_transport::PhoneStatsSnap>>,
+    clock: Arc<Mutex<krapy_transport::ClockSync>>,
+    epoch: Arc<Instant>,
 ) {
     let mut dec: Box<dyn Decoder> = match open(decoder.as_deref()) {
         Ok(d) => d,
@@ -338,8 +436,7 @@ fn decode_loop(
         }
     };
     while !stop.load(Ordering::Relaxed) {
-        let Some(cf) = frames.pop() else {
-            thread::sleep(POLL);
+        let Some(cf) = frames.pop_wait(POLL) else {
             continue;
         };
         counters.frames_in.fetch_add(1, Ordering::Relaxed);
@@ -355,6 +452,32 @@ fn decode_loop(
                 counters.lat_us.fetch_add(lat, Ordering::Relaxed);
                 counters.lat_samples.fetch_add(1, Ordering::Relaxed);
                 counters.lat_max_us.fetch_max(lat, Ordering::Relaxed);
+                let decoded_us = epoch.elapsed().as_micros() as u64;
+                let offset = clock
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.median_offset_us())
+                    .unwrap_or(0);
+                let phone_enc = phone_stats.lock().ok().map(|p| p.enc_avg_us).unwrap_or(0);
+                let capture_desktop = cf.capture_us as i64 - offset;
+                let total = decoded_us as i64 - capture_desktop;
+                if total > 0 {
+                    counters.total_us.fetch_add(total as u64, Ordering::Relaxed);
+                    counters.total_samples.fetch_add(1, Ordering::Relaxed);
+                    counters
+                        .total_max_us
+                        .fetch_max(total as u64, Ordering::Relaxed);
+                }
+                let net = cf.first_arrival_us as i64 - capture_desktop - phone_enc as i64;
+                if net > 0 {
+                    counters.net_us.fetch_add(net as u64, Ordering::Relaxed);
+                }
+                let pipe = decoded_us as i64 - cf.completed_us as i64;
+                if pipe > 0 {
+                    counters
+                        .pipe_decode_us
+                        .fetch_add(pipe as u64, Ordering::Relaxed);
+                }
             }
             Ok(None) => {
                 if dec.needs_keyframe() && !frames.waiting_for_key() {
@@ -373,50 +496,57 @@ fn stats_loop(
     counters: Arc<Counters>,
     stats_win: Arc<Mutex<krapy_transport::NetWindow>>,
     frames: Arc<FrameQueue>,
+    phone_stats: Arc<Mutex<krapy_transport::PhoneStatsSnap>>,
+    clock: Arc<Mutex<krapy_transport::ClockSync>>,
     stop: Arc<AtomicBool>,
 ) {
-    let mut prev_in = 0u64;
     let mut prev_out = 0u64;
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_secs(1));
-        let in_now = counters.frames_in.load(Ordering::Relaxed);
         let out_now = counters.frames_out.load(Ordering::Relaxed);
-        let fps_in = in_now.saturating_sub(prev_in);
-        let fps_out = out_now.saturating_sub(prev_out);
-        prev_in = in_now;
+        let fps = out_now.saturating_sub(prev_out);
         prev_out = out_now;
-        let (rtt, jitter, loss) = stats_win
+        let loss = stats_win
             .lock()
             .ok()
             .and_then(|w| w.last())
-            .map(|net| (net.rtt_ms, net.jitter_ms, net.loss))
-            .unwrap_or((0.0, 0.0, 0.0));
-        let ds = counters.decode_samples.load(Ordering::Relaxed).max(1);
-        let decode_ms = counters.decode_us.load(Ordering::Relaxed) as f64 / ds as f64 / 1000.0;
-        let bitrate = counters.bitrate.load(Ordering::Relaxed);
-        let dropped = stats_win
-            .lock()
-            .ok()
-            .map(|w| w.total_dropped())
-            .unwrap_or(0);
-        let n = counters.lat_samples.swap(0, Ordering::Relaxed);
-        let sum = counters.lat_us.swap(0, Ordering::Relaxed);
-        let max = counters.lat_max_us.swap(0, Ordering::Relaxed);
-        let desk_ms = if n > 0 {
-            sum as f64 / n as f64 / 1000.0
+            .map(|net| net.loss)
+            .unwrap_or(0.0);
+        let ps = phone_stats.lock().ok().map(|p| *p).unwrap_or_default();
+        let phone_ms = ps.enc_avg_us as f64 / 1000.0;
+        let tn = counters.total_samples.swap(0, Ordering::Relaxed);
+        let total_ms = if tn > 0 {
+            counters.total_us.swap(0, Ordering::Relaxed) as f64 / tn as f64 / 1000.0
         } else {
             0.0
         };
-        let skipped = frames.skipped();
-        println!(
-            "stats fps_in={fps_in} fps_out={fps_out} rtt={rtt:.1}ms jitter={jitter:.1}ms loss={loss:.2} bitrate={bitrate} dropped={dropped} skipped={skipped} decode={decode_ms:.1}ms",
-        );
-        println!(
-            "latency ~{:.1}ms (network ~{:.1}ms + receive-to-screen {desk_ms:.1}ms avg, {:.1}ms max)",
-            rtt as f64 / 2.0 + desk_ms,
-            rtt as f64 / 2.0,
-            max as f64 / 1000.0,
-        );
+        let total_max_ms = counters.total_max_us.swap(0, Ordering::Relaxed) as f64 / 1000.0;
+        let net_ms = if tn > 0 {
+            counters.net_us.swap(0, Ordering::Relaxed) as f64 / tn as f64 / 1000.0
+        } else {
+            0.0
+        };
+        let dec_ms = if tn > 0 {
+            counters.pipe_decode_us.swap(0, Ordering::Relaxed) as f64 / tn as f64 / 1000.0
+        } else {
+            0.0
+        };
+        let bitrate_mbps = counters.bitrate.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let has_clock = clock
+            .lock()
+            .ok()
+            .and_then(|c| c.median_offset_us())
+            .is_some();
+        if has_clock && tn > 0 {
+            println!(
+                "latency  phone {phone_ms:.1} ms  network {net_ms:.1} ms  decode {dec_ms:.1} ms  total {total_ms:.1} ms (capture to decoded; max {total_max_ms:.1} ms)  fps {fps}  {bitrate_mbps:.1} Mbps  loss {loss:.1}%",
+            );
+        } else {
+            println!(
+                "latency  phone {phone_ms:.1} ms  (clock offset pending)  fps {fps}  {bitrate_mbps:.1} Mbps  loss {loss:.1}%",
+            );
+        }
+        let _ = frames.skipped();
     }
 }
 

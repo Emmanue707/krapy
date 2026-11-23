@@ -135,7 +135,7 @@ impl Phone {
                 idx,
                 count,
                 flags: if key { FLAG_KEYFRAME } else { 0 },
-                capture_us: 0,
+                capture_us: id as u64 * 16_667,
                 data: Cow::Borrowed(&au[s..(s + UDP_CHUNK).min(au.len())]),
             };
             let body = encode_datagram_body(&d).expect("body");
@@ -156,7 +156,7 @@ impl Phone {
                 idx,
                 count,
                 flags: if key { FLAG_KEYFRAME } else { 0 },
-                capture_us: 0,
+                capture_us: id as u64 * 16_667,
                 data: au[s..(s + TCP_CHUNK).min(au.len())].to_vec(),
             };
             let pt = encode_control(&c).expect("chunk");
@@ -181,8 +181,7 @@ fn run(tcp: bool) -> anyhow::Result<Vec<f64>> {
         let mut lat = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while lat.len() < n && Instant::now() < deadline {
-            let Some(cf) = frames.pop() else {
-                thread::sleep(Duration::from_micros(200));
+            let Some(cf) = frames.pop_wait(Duration::from_millis(50)) else {
                 continue;
             };
             if dec.decode(&cf.data)?.is_some() {
