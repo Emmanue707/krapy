@@ -1,5 +1,4 @@
 use crate::Decoder;
-use crate::annex::{has_idr, parameter_sets_only};
 use crate::i420::{Frame, pack_yuv420p_into};
 use anyhow::{Result, anyhow};
 use ffmpeg_next::Error as FfmpegError;
@@ -12,27 +11,45 @@ use ffmpeg_next::software::scaling::{context::Context as Scaler, flag::Flags as 
 use ffmpeg_next::util::format::pixel::Pixel;
 use ffmpeg_next::util::frame::video::Video as VideoFrame;
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static INIT: Once = Once::new();
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_log_verbose(verbose: bool) {
+    VERBOSE.store(verbose, Ordering::Relaxed);
+    let level = if verbose {
+        ffmpeg_next::util::log::Level::Warning
+    } else {
+        ffmpeg_next::util::log::Level::Quiet
+    };
+    ffmpeg_next::util::log::set_level(level);
+}
 
 pub struct FfmpegDecoder {
     decoder: ffmpeg_next::codec::decoder::Video,
     video: VideoFrame,
     bufs: [Frame; 2],
     buf_idx: u8,
-    pending: Vec<u8>,
-    feed: Vec<u8>,
 }
 
 impl FfmpegDecoder {
     pub fn new() -> Result<Self> {
         INIT.call_once(|| {
             let _ = ffmpeg_next::init();
+            if !VERBOSE.load(Ordering::Relaxed) {
+                ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Quiet);
+            }
         });
         let codec = ffmpeg_next::codec::decoder::find(Id::H264)
             .ok_or_else(|| anyhow!("h264 decoder not found"))?;
         let mut ctx = Context::new_with_codec(codec);
         ctx.set_flags(Flags::LOW_DELAY);
+        // ffmpeg-sys types this differently depending on how it was built
+        #[allow(clippy::unnecessary_cast)]
+        unsafe {
+            (*ctx.as_mut_ptr()).flags2 |= ffmpeg_next::ffi::AV_CODEC_FLAG2_FAST as i32;
+        }
         ctx.set_threading(threading::Config {
             kind: threading::Type::Slice,
             count: 1,
@@ -43,16 +60,7 @@ impl FfmpegDecoder {
             video: VideoFrame::empty(),
             bufs: [Frame::default(), Frame::default()],
             buf_idx: 0,
-            pending: Vec::new(),
-            feed: Vec::new(),
         })
-    }
-
-    fn store_config(&mut self, data: &[u8]) {
-        self.pending.extend_from_slice(data);
-        let pkt = Packet::borrow(data);
-        let _ = self.decoder.send_packet(&pkt);
-        let _ = self.try_receive();
     }
 
     fn try_receive(&mut self) -> Result<Option<Frame>> {
@@ -117,27 +125,11 @@ impl Decoder for FfmpegDecoder {
         if annexb.is_empty() {
             return Ok(None);
         }
-        if parameter_sets_only(annexb) {
-            self.store_config(annexb);
-            return Ok(None);
-        }
-        let input = if self.pending.is_empty() || !has_idr(annexb) {
-            annexb
-        } else {
-            self.feed.clear();
-            self.feed.extend_from_slice(&self.pending);
-            self.feed.extend_from_slice(annexb);
-            self.feed.as_slice()
-        };
         {
-            let pkt = Packet::borrow(input);
+            let pkt = Packet::borrow(annexb);
             self.decoder.send_packet(&pkt).map_err(ffmpeg_err)?;
         }
-        let frame = self.try_receive()?;
-        if frame.is_some() && has_idr(annexb) {
-            self.pending.clear();
-        }
-        Ok(frame)
+        self.try_receive()
     }
 
     fn flush(&mut self) -> Result<Option<Frame>> {
