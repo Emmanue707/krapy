@@ -1,40 +1,21 @@
-pub(crate) fn nal_type_at(data: &[u8], mut i: usize) -> Option<u8> {
-    if data[i..].starts_with(&[0, 0, 0, 1]) {
-        i += 4;
-    } else if data[i..].starts_with(&[0, 0, 1]) {
-        i += 3;
-    } else {
-        return None;
-    }
-    data.get(i).map(|b| b & 0x1f)
-}
-
-pub(crate) fn parameter_sets_only(data: &[u8]) -> bool {
-    let mut i = 0;
-    let mut saw = false;
-    while i + 3 < data.len() {
-        let Some(ty) = nal_type_at(data, i) else {
-            i += 1;
-            continue;
-        };
-        if ty != 7 && ty != 8 {
-            return false;
-        }
-        saw = true;
-        i += 1;
-    }
-    saw
-}
-
-pub(crate) fn has_idr(data: &[u8]) -> bool {
+// (start code offset, nal type) for every nal in an annex-b buffer
+pub(crate) fn nal_starts(data: &[u8]) -> Vec<(usize, u8)> {
+    let mut out = Vec::new();
     let mut i = 0;
     while i + 3 < data.len() {
-        if let Some(ty) = nal_type_at(data, i)
-            && ty == 5
-        {
-            return true;
+        if data[i] == 0 && data[i + 1] == 0 {
+            if data[i + 2] == 1 {
+                out.push((i, data[i + 3] & 0x1f));
+                i += 3;
+                continue;
+            }
+            if data[i + 2] == 0 && i + 4 < data.len() && data[i + 3] == 1 {
+                out.push((i, data[i + 4] & 0x1f));
+                i += 4;
+                continue;
+            }
         }
         i += 1;
     }
-    false
+    out
 }

@@ -1,4 +1,5 @@
 mod annex;
+mod gate;
 mod i420;
 
 #[cfg(feature = "ffmpeg")]
@@ -15,7 +16,17 @@ pub trait Decoder: Send {
         Ok(None)
     }
     fn reset(&mut self);
+    fn needs_keyframe(&self) -> bool {
+        false
+    }
     fn name(&self) -> &'static str;
+}
+
+pub fn set_log_verbose(verbose: bool) {
+    #[cfg(feature = "ffmpeg")]
+    ffdec::set_log_verbose(verbose);
+    #[cfg(not(feature = "ffmpeg"))]
+    let _ = verbose;
 }
 
 pub fn available() -> Vec<&'static str> {
@@ -38,7 +49,7 @@ pub fn open(preferred: Option<&str>) -> anyhow::Result<Box<dyn Decoder>> {
     let mut last = None;
     for name in order {
         match try_open(name) {
-            Ok(dec) => return Ok(dec),
+            Ok(dec) => return Ok(Box::new(gate::Gated::new(dec))),
             Err(e) => last = Some(e),
         }
     }
