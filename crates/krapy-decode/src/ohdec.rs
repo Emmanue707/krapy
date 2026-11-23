@@ -1,4 +1,5 @@
 use crate::Decoder;
+use crate::annex::nal_starts;
 use crate::i420::{Frame, pack_yuv420p_into};
 use anyhow::{Result, anyhow};
 use openh264::OpenH264API;
@@ -38,6 +39,8 @@ impl Decoder for OpenH264Decoder {
         {
             let decoded = match self.inner.decode(input) {
                 Ok(v) => v,
+                // openh264 reports errors on some fine p-frames
+                Err(_) if !nal_starts(annexb).iter().any(|&(_, t)| t == 5) => return Ok(None),
                 Err(e) => return Err(anyhow!("{e}")),
             };
             let Some(yuv) = decoded else {
