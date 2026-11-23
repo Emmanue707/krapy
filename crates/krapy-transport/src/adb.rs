@@ -196,6 +196,8 @@ pub fn wait_usb_device(preferred: Option<&str>) -> Result<String> {
 }
 
 pub fn launch_app(serial: &str, uri: &str) -> Result<()> {
+    let quoted = format!("'{}'", uri.replace('\'', ""));
+    let uri = quoted.as_str();
     let out = run(
         [
             "-s",
