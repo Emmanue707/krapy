@@ -188,7 +188,7 @@ fn init_tracing(verbose: u8) {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-fn stream_opts(args: &StreamArgs) -> MirrorOpts {
+fn stream_opts(args: &StreamArgs, verbose: bool) -> MirrorOpts {
     MirrorOpts {
         preset: args.preset.into(),
         decoder: args.decoder.map(DecoderArg::name).map(str::to_string),
@@ -197,16 +197,22 @@ fn stream_opts(args: &StreamArgs) -> MirrorOpts {
         fps: args.fps,
         stats: args.stats,
         no_window: args.no_window,
+        verbose,
     }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    let verbose = cli.verbose > 0;
+    krapy_decode::set_log_verbose(verbose);
+    if std::env::var_os("SUDO_USER").is_some() || std::env::var("USER").as_deref() == Ok("root") {
+        eprintln!("note: no need for sudo; run krapy as your normal user");
+    }
     match cli.cmd {
         Command::List => cmd::list::run(),
         Command::Pair { stream, name, adb } => {
-            cmd::pair::run(stream.port, &name, stream_opts(&stream), adb)
+            cmd::pair::run(stream.port, &name, stream_opts(&stream, verbose), adb)
         }
         Command::Connect {
             device,
@@ -214,7 +220,7 @@ fn main() -> Result<()> {
             usb,
             serial,
         } => {
-            let opts = stream_opts(&stream);
+            let opts = stream_opts(&stream, verbose);
             if usb {
                 cmd::connect::run_usb(device, serial, stream.port, opts)
             } else {
@@ -229,7 +235,7 @@ fn main() -> Result<()> {
             cmd,
         } => match cmd {
             None | Some(AdbCommand::Usb) => {
-                cmd::adb::usb(device, serial, stream.port, stream_opts(&stream))
+                cmd::adb::usb(device, serial, stream.port, stream_opts(&stream, verbose))
             }
             Some(AdbCommand::Pair { host_port, code }) => cmd::adb::pair(&host_port, &code),
             Some(AdbCommand::Connect { host_port }) => cmd::adb::connect(&host_port),
