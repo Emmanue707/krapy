@@ -1,4 +1,5 @@
 use crate::wire::Datagram;
+use std::time::Instant;
 
 pub const FLAG_KEYFRAME: u8 = 1;
 pub const FLAG_CODEC_CONFIG: u8 = 2;
@@ -9,6 +10,7 @@ pub struct CompleteFrame {
     pub flags: u8,
     pub capture_us: u64,
     pub data: Vec<u8>,
+    pub received: Instant,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -96,7 +98,7 @@ impl Reassembler {
             while self.partials.len() >= 3 {
                 let dropped = self.partials.remove(0);
                 self.stats.frames_dropped += 1;
-                if dropped.flags & FLAG_KEYFRAME == 0 {
+                if dropped.flags & FLAG_CODEC_CONFIG == 0 || dropped.flags & FLAG_KEYFRAME != 0 {
                     self.need_keyframe = true;
                 }
             }
@@ -146,7 +148,7 @@ impl Reassembler {
             if let Some(i) = self.partials.iter().position(|p| p.frame_id == oid) {
                 let dropped = self.partials.remove(i);
                 self.stats.frames_dropped += 1;
-                if dropped.flags & FLAG_KEYFRAME == 0 {
+                if dropped.flags & FLAG_CODEC_CONFIG == 0 || dropped.flags & FLAG_KEYFRAME != 0 {
                     self.need_keyframe = true;
                 }
             }
@@ -162,7 +164,8 @@ impl Reassembler {
         self.out_buf = Vec::with_capacity(cap.max(4096));
 
         let is_key = done.flags & FLAG_KEYFRAME != 0;
-        if self.need_keyframe && !is_key {
+        let config_only = done.flags & FLAG_CODEC_CONFIG != 0 && !is_key;
+        if self.need_keyframe && !is_key && !config_only {
             self.stats.frames_dropped += 1;
             self.need_keyframe = true;
             return None;
@@ -177,6 +180,7 @@ impl Reassembler {
             flags: done.flags,
             capture_us: done.capture_us,
             data,
+            received: Instant::now(),
         })
     }
 }
@@ -245,5 +249,24 @@ mod tests {
         let mut r = Reassembler::new();
         let _ = r.ingest(&frag(1, 0, 1, FLAG_KEYFRAME, b"a"));
         assert!(r.ingest(&frag(0, 0, 1, FLAG_KEYFRAME, b"z")).is_none());
+    }
+
+    #[test]
+    fn lost_keyframe_needs_another() {
+        let mut r = Reassembler::new();
+        let _ = r.ingest(&frag(1, 0, 2, FLAG_KEYFRAME, b"k"));
+        assert!(r.ingest(&frag(2, 0, 1, 0, b"p")).is_none());
+        assert!(r.keyframe_wanted());
+    }
+
+    #[test]
+    fn config_passes_while_waiting_for_keyframe() {
+        let mut r = Reassembler::new();
+        let _ = r.ingest(&frag(1, 0, 2, 0, b"a"));
+        let _ = r.ingest(&frag(2, 0, 1, 0, b"b"));
+        assert!(r.keyframe_wanted());
+        let c = r.ingest(&frag(3, 0, 1, FLAG_CODEC_CONFIG, b"sps"));
+        assert_eq!(c.expect("config").data, b"sps");
+        assert!(r.keyframe_wanted());
     }
 }
