@@ -85,7 +85,7 @@ class Link(
         videoOverTcp = isLoopback(h)
         try {
             val socket = Socket()
-            socket.sendBufferSize = 1024 * 1024
+            socket.sendBufferSize = 512 * 1024
             socket.trafficClass = 0xB8
             socket.connect(InetSocketAddress(h, p), 2000)
             socket.tcpNoDelay = true
@@ -147,7 +147,7 @@ class Link(
                 out.flush()
             }
             val dg = DatagramSocket()
-            dg.sendBufferSize = 1024 * 1024
+            dg.sendBufferSize = 256 * 1024
             dg.trafficClass = 0xB8
             dg.connect(InetSocketAddress(h, p))
             udp = dg
