@@ -156,8 +156,13 @@ fn srgb_to_linear(c: vec3f) -> vec3f {
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let uv_y = in.uv;
     let y = sample_y(uv_y);
-    let u = textureSampleLevel(t_u, smp, uv_y, 0.0).r * 255.0;
-    let v = textureSampleLevel(t_v, smp, uv_y, 0.0).r * 255.0;
+    let px = uv_y * params.tex_size;
+    let uv_c = vec2f(
+        (px.x - 0.5) / params.tex_size.x,
+        (px.y - 0.5) / params.tex_size.y,
+    );
+    let u = textureSampleLevel(t_u, smp, uv_c, 0.0).r * 255.0;
+    let v = textureSampleLevel(t_v, smp, uv_c, 0.0).r * 255.0;
     var rgb = rgb_from_yuv(y, u, v);
     if params.out_srgb != 0u {
         rgb = srgb_to_linear(rgb);

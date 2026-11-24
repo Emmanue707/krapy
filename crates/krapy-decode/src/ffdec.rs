@@ -33,10 +33,16 @@ pub struct FfmpegDecoder {
     video: VideoFrame,
     bufs: [Frame; 2],
     buf_idx: u8,
+    frame_budget_us: u64,
+    behind: bool,
 }
 
 impl FfmpegDecoder {
     pub fn new() -> Result<Self> {
+        Self::open_sw()
+    }
+
+    fn open_sw() -> Result<Self> {
         INIT.call_once(|| {
             let _ = ffmpeg_next::init();
             if !VERBOSE.load(Ordering::Relaxed) {
@@ -47,10 +53,11 @@ impl FfmpegDecoder {
             .ok_or_else(|| anyhow!("h264 decoder not found"))?;
         let mut ctx = Context::new_with_codec(codec);
         ctx.set_flags(Flags::LOW_DELAY);
-        // ffmpeg-sys types this differently depending on how it was built
         #[allow(clippy::unnecessary_cast)]
         unsafe {
             (*ctx.as_mut_ptr()).flags2 |= ffmpeg_next::ffi::AV_CODEC_FLAG2_FAST as i32;
+            (*ctx.as_mut_ptr()).thread_count = 1;
+            (*ctx.as_mut_ptr()).thread_type = 0;
         }
         ctx.set_threading(threading::Config {
             kind: threading::Type::Slice,
@@ -62,7 +69,21 @@ impl FfmpegDecoder {
             video: VideoFrame::empty(),
             bufs: [Frame::default(), Frame::default()],
             buf_idx: 0,
+            frame_budget_us: 16_667,
+            behind: false,
         })
+    }
+
+    fn set_loop_filter(&mut self) {
+        #[allow(clippy::unnecessary_cast)]
+        unsafe {
+            let ptr = self.decoder.as_mut_ptr();
+            (*ptr).skip_loop_filter = if self.behind {
+                ffmpeg_next::ffi::AVDiscard::AVDISCARD_NONREF
+            } else {
+                ffmpeg_next::ffi::AVDiscard::AVDISCARD_DEFAULT
+            };
+        }
     }
 
     fn try_receive(&mut self) -> Result<Option<Frame>> {
@@ -138,11 +159,16 @@ impl Decoder for FfmpegDecoder {
         if annexb.is_empty() {
             return Ok(None);
         }
+        self.set_loop_filter();
+        let t0 = std::time::Instant::now();
         {
             let pkt = Packet::borrow(annexb);
             self.decoder.send_packet(&pkt).map_err(ffmpeg_err)?;
         }
-        self.try_receive()
+        let out = self.try_receive()?;
+        let us = t0.elapsed().as_micros() as u64;
+        self.behind = us > self.frame_budget_us;
+        Ok(out)
     }
 
     fn flush(&mut self) -> Result<Option<Frame>> {
@@ -152,6 +178,7 @@ impl Decoder for FfmpegDecoder {
 
     fn reset(&mut self) {
         self.decoder.flush();
+        self.behind = false;
     }
 
     fn name(&self) -> &'static str {

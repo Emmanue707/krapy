@@ -332,9 +332,20 @@ fn drive_session(
         let stop = Arc::clone(&stats_stop);
         let phone_stats = Arc::clone(&phone_stats);
         let clock = Arc::clone(&clock);
+        let verbose = opts.verbose;
         thread::Builder::new()
             .stack_size(SMALL_STACK)
-            .spawn(move || stats_loop(counters, stats_win, frames, phone_stats, clock, stop))
+            .spawn(move || {
+                stats_loop(
+                    counters,
+                    stats_win,
+                    frames,
+                    phone_stats,
+                    clock,
+                    stop,
+                    verbose,
+                )
+            })
             .expect("stats thread")
     });
 
@@ -595,6 +606,7 @@ fn stats_loop(
     phone_stats: Arc<Mutex<krapy_transport::PhoneStatsSnap>>,
     clock: Arc<Mutex<krapy_transport::ClockSync>>,
     stop: Arc<AtomicBool>,
+    verbose: bool,
 ) {
     let mut prev_out = 0u64;
     while !stop.load(Ordering::Relaxed) {
@@ -627,6 +639,9 @@ fn stats_loop(
         } else {
             0.0
         };
+        let ds = counters.decode_samples.load(Ordering::Relaxed).max(1);
+        let decode_cpu_ms = counters.decode_us.load(Ordering::Relaxed) as f64 / ds as f64 / 1000.0;
+        let skips = frames.skipped();
         let bitrate_mbps = counters.bitrate.load(Ordering::Relaxed) as f64 / 1_000_000.0;
         let has_clock = clock
             .lock()
@@ -635,14 +650,23 @@ fn stats_loop(
             .is_some();
         if has_clock && tn > 0 {
             println!(
-                "latency  phone {phone_ms:.1} ms  network {net_ms:.1} ms  decode {dec_ms:.1} ms  total {total_ms:.1} ms (capture to decoded; max {total_max_ms:.1} ms)  fps {fps}  {bitrate_mbps:.1} Mbps  loss {loss:.1}%",
+                "latency  phone {phone_ms:.1} ms  network {net_ms:.1} ms  decode {dec_ms:.1} ms  dec_cpu {decode_cpu_ms:.2} ms  total {total_ms:.1} ms (capture to decoded; max {total_max_ms:.1} ms)  fps {fps}  {bitrate_mbps:.1} Mbps  loss {loss:.1}%{}",
+                if verbose {
+                    format!("  skipped {skips}")
+                } else {
+                    String::new()
+                },
             );
         } else {
             println!(
-                "latency  phone {phone_ms:.1} ms  (clock offset pending)  fps {fps}  {bitrate_mbps:.1} Mbps  loss {loss:.1}%",
+                "latency  phone {phone_ms:.1} ms  (clock offset pending)  fps {fps}  {bitrate_mbps:.1} Mbps  loss {loss:.1}%{}",
+                if verbose {
+                    format!("  dec_cpu {decode_cpu_ms:.2} ms  skipped {skips}")
+                } else {
+                    String::new()
+                },
             );
         }
-        let _ = frames.skipped();
     }
 }
 

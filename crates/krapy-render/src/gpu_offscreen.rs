@@ -87,6 +87,29 @@ fn quad_frame(w: u32, h: u32) -> Frame {
     frame
 }
 
+fn chroma_siting_frame(w: u32, h: u32) -> Frame {
+    let hw = w / 2;
+    let hh = h / 2;
+    Frame {
+        width: w,
+        height: h,
+        stride_y: w as usize,
+        stride_uv: (w / 2) as usize,
+        color: ColorSpec::DEFAULT,
+        y: vec![180; (w * h) as usize],
+        u: {
+            let mut u = vec![128; (hw * hh) as usize];
+            for row in 0..hh {
+                for col in 0..hw {
+                    u[(row * hw + col) as usize] = if col == 0 { 64 } else { 192 };
+                }
+            }
+            u
+        },
+        v: vec![128; (hw * hh) as usize],
+    }
+}
+
 fn read_rgba(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -412,4 +435,10 @@ fn gpu_offscreen_render_pipeline() {
     near_rgb(&px, 8, 8, 16, er, eg, eb);
     let px = render(&ctx, &gfx, &flat, 32, 32, format, 0, 2.0, false);
     near_rgb(&px, 16, 16, 32, er, eg, eb);
+
+    let grad = chroma_siting_frame(8, 8);
+    let px = render(&ctx, &gfx, &grad, 8, 8, format, 0, 1.0, false);
+    let (r0, _, _) = px_rgb(&px, 1, 0, 8);
+    let (r1, _, _) = px_rgb(&px, 2, 0, 8);
+    assert!(near(r0, r1), "chroma left siting: ({r0},{r1})");
 }
