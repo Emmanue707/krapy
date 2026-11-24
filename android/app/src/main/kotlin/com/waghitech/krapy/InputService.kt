@@ -5,6 +5,8 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityNodeInfo
 
 class InputService : AccessibilityService() {
@@ -12,7 +14,8 @@ class InputService : AccessibilityService() {
     private var videoH = 1
     private var displayW = 1
     private var displayH = 1
-    private var strokePath = Path()
+    private val planner = TouchGesturePlanner()
+    private val handler = Handler(Looper.getMainLooper())
     private var activeStroke: GestureDescription.StrokeDescription? = null
 
     override fun onServiceConnected() {
@@ -37,28 +40,26 @@ class InputService : AccessibilityService() {
     }
 
     fun onTouch(action: Int, x: Int, y: Int) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            onTouchMain(action, x, y)
+        } else {
+            handler.post { onTouchMain(action, x, y) }
+        }
+    }
+
+    private fun onTouchMain(action: Int, x: Int, y: Int) {
         val mx = x * displayW.toFloat() / videoW
         val my = y * displayH.toFloat() / videoH
-        when (action) {
-            0 -> {
-                strokePath = Path().apply { moveTo(mx, my) }
-                activeStroke = GestureDescription.StrokeDescription(strokePath, 0, 1, true)
-                fireGesture(activeStroke!!)
+        val now = System.currentTimeMillis()
+        val seg =
+            when (action) {
+                0 -> planner.onDown(mx, my, now)
+                1 -> planner.onMove(mx, my, now)
+                2 -> planner.onUp(mx, my, now)
+                else -> null
             }
-            1 -> {
-                val prev = activeStroke ?: return
-                strokePath.lineTo(mx, my)
-                val next = prev.continueStroke(strokePath, 0, 1, true)
-                activeStroke = next
-                fireGesture(next)
-            }
-            2 -> {
-                val prev = activeStroke ?: return
-                strokePath.lineTo(mx, my)
-                val next = prev.continueStroke(strokePath, 0, 1, false)
-                activeStroke = null
-                fireGesture(next)
-            }
+        if (seg != null) {
+            dispatchSegment(seg, now)
         }
     }
 
@@ -86,9 +87,43 @@ class InputService : AccessibilityService() {
         focus.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
-    private fun fireGesture(stroke: GestureDescription.StrokeDescription) {
+    private fun dispatchSegment(seg: GestureSegment, nowMs: Long) {
+        val path =
+            Path().apply {
+                moveTo(seg.fromX, seg.fromY)
+                lineTo(seg.toX, seg.toY)
+            }
+        val stroke =
+            if (seg.freshDown || activeStroke == null) {
+                GestureDescription.StrokeDescription(path, 0, seg.durationMs, seg.willContinue)
+            } else {
+                activeStroke!!.continueStroke(path, 0, seg.durationMs, seg.willContinue)
+            }
+        if (!seg.willContinue) {
+            activeStroke = null
+        } else {
+            activeStroke = stroke
+        }
         val g = GestureDescription.Builder().addStroke(stroke).build()
-        dispatchGesture(g, null, null)
+        planner.onSegmentDispatched(nowMs)
+        val cb =
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    val next = planner.onSegmentComplete(System.currentTimeMillis())
+                    if (next != null) {
+                        dispatchSegment(next, System.currentTimeMillis())
+                    }
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    activeStroke = null
+                    val next = planner.onSegmentCancelled(System.currentTimeMillis())
+                    if (next != null) {
+                        dispatchSegment(next, System.currentTimeMillis())
+                    }
+                }
+            }
+        dispatchGesture(g, cb, handler)
     }
 
     object InputBridge {
