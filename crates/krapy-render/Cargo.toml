@@ -10,9 +10,17 @@ repository.workspace = true
 anyhow = { workspace = true }
 bytemuck = { version = "1", features = ["derive"] }
 winit = { version = "0.30", default-features = true }
-wgpu = "26"
 pollster = "0.4"
-arboard = "3"
+arboard = { version = "3", default-features = false }
 krapy-decode = { path = "../krapy-decode", default-features = false }
 krapy-transport = { path = "../krapy-transport" }
 qrcode = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "26", default-features = false, features = ["std", "wgsl", "vulkan", "gles"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { version = "26", default-features = false, features = ["std", "wgsl", "dx12", "vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "26", default-features = false, features = ["std", "wgsl", "metal"] }

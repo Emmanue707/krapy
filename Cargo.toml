@@ -20,15 +20,30 @@ hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-qrcode = "0.14"
+qrcode = { version = "0.14", default-features = false }
 base64 = "0.22"
 urlencoding = "2"
 
 krapy-core = { path = "crates/krapy-core" }
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+opt-level = "s"
+
+[profile.release.package.krapy-decode]
+opt-level = 3
+
+[profile.release.package.krapy-transport]
+opt-level = 3
+
+[profile.release.package.krapy-render]
+opt-level = 3
+
+[profile.release.package.krapy-audio]
+opt-level = 3
+
+[profile.release.package.ffmpeg-next]
 opt-level = 3
