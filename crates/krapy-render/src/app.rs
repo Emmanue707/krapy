@@ -11,6 +11,7 @@ use krapy_transport::Control;
 use krapy_transport::wire::SET_KEY_ROTATE;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -35,7 +36,11 @@ pub struct KrapyApp {
     menu_open: bool,
     overlay_quads: Vec<OverlayQuad>,
     synced_rotation: bool,
+    last_move_sent: Option<Instant>,
+    pending_touch: Option<(u16, u16)>,
 }
+
+const MOVE_THROTTLE: Duration = Duration::from_millis(8);
 
 impl KrapyApp {
     fn new(source: FrameSource, device_name: String, control: Sender<Control>) -> Self {
@@ -56,6 +61,8 @@ impl KrapyApp {
             menu_open: false,
             overlay_quads: Vec::new(),
             synced_rotation: false,
+            last_move_sent: None,
+            pending_touch: None,
         }
     }
 
@@ -182,6 +189,23 @@ impl KrapyApp {
         });
     }
 
+    fn flush_pending_move(&mut self) {
+        if let Some((x, y)) = self.pending_touch.take() {
+            self.touch(1, x, y);
+            self.last_move_sent = Some(Instant::now());
+        }
+    }
+
+    fn send_move_throttled(&mut self, x: u16, y: u16) {
+        self.pending_touch = Some((x, y));
+        let due = self
+            .last_move_sent
+            .is_none_or(|t| t.elapsed() >= MOVE_THROTTLE);
+        if due {
+            self.flush_pending_move();
+        }
+    }
+
     fn local_rotate(&mut self) {
         self.rotation = self.rotation.wrapping_add(1) & 3;
         if let Some(w) = &self.window {
@@ -284,7 +308,7 @@ impl ApplicationHandler<Wake> for KrapyApp {
                 if self.pointer_down
                     && let Some((x, y)) = self.pointer_at(position.x as f32, position.y as f32)
                 {
-                    self.touch(1, x, y);
+                    self.send_move_throttled(x, y);
                 }
             }
             _ => {}
@@ -358,7 +382,6 @@ impl KrapyApp {
         }
         match button {
             MouseButton::Left => {
-                self.pointer_down = state == ElementState::Pressed;
                 let action = match state {
                     ElementState::Pressed => 0u8,
                     ElementState::Released => 2u8,
@@ -366,7 +389,22 @@ impl KrapyApp {
                 if let Some((px, py)) = self.cursor
                     && let Some((x, y)) = self.pointer_at(px, py)
                 {
-                    self.touch(action, x, y);
+                    if state == ElementState::Pressed {
+                        self.pointer_down = true;
+                        self.pending_touch = None;
+                        self.last_move_sent = None;
+                        self.touch(action, x, y);
+                    } else {
+                        self.flush_pending_move();
+                        self.touch(action, x, y);
+                        self.pointer_down = false;
+                        self.pending_touch = None;
+                        self.last_move_sent = None;
+                    }
+                } else if state == ElementState::Released {
+                    self.pointer_down = false;
+                    self.pending_touch = None;
+                    self.last_move_sent = None;
                 }
             }
             MouseButton::Right if state == ElementState::Pressed => {
