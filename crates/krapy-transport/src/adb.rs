@@ -214,27 +214,145 @@ pub fn wake_screen(serial: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn screen_locked(serial: &str) -> Result<bool> {
-    let power = run(["-s", serial, "shell", "dumpsys", "power"], RUN_TIMEOUT)?;
-    let win = run(["-s", serial, "shell", "dumpsys", "window"], RUN_TIMEOUT)?;
-    let p = String::from_utf8_lossy(&power.stdout);
-    let w = String::from_utf8_lossy(&win.stdout);
-    let locked = p.contains("mDreamingLockscreen=true")
-        || w.contains("mShowingLockscreen=true")
-        || w.contains("isKeyguardShowing=true");
-    Ok(locked)
+pub fn screen_power_state(text: &str) -> Option<&str> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("mWakefulness=")?;
+        Some(rest.trim())
+    })
 }
 
+pub fn screen_needs_wake(power_text: &str) -> bool {
+    matches!(
+        screen_power_state(power_text),
+        Some("Asleep") | Some("Dozing")
+    )
+}
+
+fn line_flag(text: &str, key: &str) -> Option<bool> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(key) else {
+            if let Some(idx) = line.find(key) {
+                let tail = line[idx + key.len()..].trim();
+                let tail = tail.strip_prefix('=').unwrap_or(tail).trim();
+                if tail.eq_ignore_ascii_case("true") || tail == "1" {
+                    return Some(true);
+                }
+                if tail.eq_ignore_ascii_case("false") || tail == "0" {
+                    return Some(false);
+                }
+            }
+            continue;
+        };
+        let v = rest.trim().strip_prefix('=').unwrap_or(rest).trim();
+        if v.eq_ignore_ascii_case("true") || v == "1" {
+            return Some(true);
+        }
+        if v.eq_ignore_ascii_case("false") || v == "0" {
+            return Some(false);
+        }
+    }
+    None
+}
+
+fn keyguard_clearly_showing(window_text: &str) -> bool {
+    [
+        line_flag(window_text, "isKeyguardShowing"),
+        line_flag(window_text, "mShowingLockscreen"),
+        line_flag(window_text, "keyguard showing"),
+    ]
+    .into_iter()
+    .any(|v| v == Some(true))
+}
+
+pub fn focus_package(window_text: &str) -> Option<String> {
+    for key in ["mCurrentFocus=", "mFocusedApp="] {
+        let Some(line) = window_text.lines().find(|l| l.contains(key)) else {
+            continue;
+        };
+        let Some(rest) = line.split(key).nth(1) else {
+            continue;
+        };
+        let pkg = rest
+            .split_whitespace()
+            .find(|t| t.contains('/'))
+            .and_then(|t| t.split('/').next())
+            .map(|s| s.trim_end_matches(['}', ')']).trim().to_string())
+            .filter(|s| !s.is_empty());
+        if pkg.is_some() {
+            return pkg;
+        }
+    }
+    None
+}
+
+fn focus_is_app_or_launcher(window_text: &str) -> bool {
+    let Some(pkg) = focus_package(window_text) else {
+        return false;
+    };
+    let lower = pkg.to_ascii_lowercase();
+    if lower.contains("keyguard") {
+        return false;
+    }
+    if lower == "com.android.systemui" {
+        return window_text.contains("Launcher")
+            || window_text.contains("launcher")
+            || window_text.contains("home");
+    }
+    true
+}
+
+pub fn parse_screen_locked(window_text: &str, _power_text: &str) -> bool {
+    if !keyguard_clearly_showing(window_text) {
+        return false;
+    }
+    !focus_is_app_or_launcher(window_text)
+}
+
+pub fn screen_locked(serial: &str) -> Result<bool> {
+    let power = run(["-s", serial, "shell", "dumpsys", "power"], RUN_TIMEOUT)?;
+    let policy = run(
+        ["-s", serial, "shell", "dumpsys", "window", "policy"],
+        RUN_TIMEOUT,
+    );
+    let win = run(["-s", serial, "shell", "dumpsys", "window"], RUN_TIMEOUT)?;
+    let p = String::from_utf8_lossy(&power.stdout);
+    let policy_text = policy
+        .as_ref()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let w = String::from_utf8_lossy(&win.stdout);
+    let window_text = if policy_text.trim().is_empty() {
+        w.into_owned()
+    } else {
+        format!("{policy_text}\n{w}")
+    };
+    if screen_needs_wake(&p) {
+        let _ = wake_screen(serial);
+        thread::sleep(Duration::from_millis(300));
+    }
+    Ok(parse_screen_locked(&window_text, &p))
+}
+
+pub const UNLOCK_HINT: &str = "if Start now does not show, unlock the phone and tap Start in krapy";
+
 pub fn wait_unlocked(serial: &str) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    if !screen_locked(serial)? {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
     println!("unlock the phone");
     while Instant::now() < deadline {
+        thread::sleep(Duration::from_secs(1));
         if !screen_locked(serial)? {
             return Ok(());
         }
-        thread::sleep(Duration::from_secs(1));
     }
-    bail!("phone still locked after 60s");
+    println!("{UNLOCK_HINT}");
+    Ok(())
 }
 
 pub fn launch_app(serial: &str, uri: &str) -> Result<()> {
@@ -449,5 +567,45 @@ pixel-8    _adb-tls-connect._tcp    192.168.0.12:37124\n";
         );
         assert_eq!(devs.len(), 1);
         assert_eq!(devs[0].state, "device");
+    }
+
+    const UNLOCKED_PIXEL: &str = "WINDOW MANAGER POLICY STATE\n\
+isKeyguardShowing=false\n\
+mShowingLockscreen=false\n\
+mCurrentFocus=Window{abc u0 com.android.chrome/com.google.android.apps.chrome.Main}\n";
+
+    const LOCKED: &str = "WINDOW MANAGER POLICY STATE\n\
+isKeyguardShowing=true\n\
+mShowingLockscreen=true\n\
+mCurrentFocus=Window{abc u0 com.android.systemui/com.android.systemui.keyguard.KeyguardService}\n";
+
+    const UNLOCKED_XOS: &str = "mDreamingLockscreen=true\n\
+isKeyguardShowing=false\n\
+mShowingLockscreen=false\n\
+mCurrentFocus=Window{abc u0 com.transsion.XOSLauncher/com.android.launcher3.Launcher}\n";
+
+    const ASLEEP_POWER: &str = "POWER MANAGER (dumpsys power)\n\
+mWakefulness=Asleep\n";
+
+    const GARBAGE: &str = "xyzzy\nno useful fields\n";
+
+    #[test]
+    fn parse_locked_states() {
+        assert!(!parse_screen_locked(UNLOCKED_PIXEL, ""));
+        assert!(parse_screen_locked(LOCKED, ""));
+        assert!(!parse_screen_locked(UNLOCKED_XOS, ""));
+        assert!(!parse_screen_locked(GARBAGE, ""));
+    }
+
+    #[test]
+    fn screen_needs_wake_only_when_asleep() {
+        assert!(screen_needs_wake(ASLEEP_POWER));
+        assert!(!screen_needs_wake("mWakefulness=Awake\n"));
+    }
+
+    #[test]
+    fn focus_package_parses() {
+        let pkg = focus_package(UNLOCKED_PIXEL).unwrap();
+        assert_eq!(pkg, "com.android.chrome");
     }
 }
