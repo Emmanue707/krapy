@@ -74,7 +74,19 @@ class MirrorService : Service(), LinkCallbacks {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        restoreSavedMusicVolume()
+    }
+
+    private fun restoreSavedMusicVolume() {
+        val v = SessionPrefs.takeSavedMusicVolume(this) ?: return
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        restoreSavedMusicVolume()
         when (intent?.action) {
             ACTION_STOP, ACTION_DISCONNECT -> {
                 stopSession("stopped")
@@ -746,7 +758,12 @@ class MirrorService : Service(), LinkCallbacks {
         refreshForegroundNotif(false)
         if (!micWanted) return
         audioCapture = try {
-            AudioCapture(proj, lk, am).also { it.start() }
+            AudioCapture(proj, lk, am, this) {
+                mainHandler.post {
+                    lastProblem = "this phone keeps playing sound while sending it to the PC"
+                    refreshForegroundNotif(false)
+                }
+            }.also { it.start() }
         } catch (t: Throwable) {
             CrashLog.record(this, t, "audio")
             micWanted = false
