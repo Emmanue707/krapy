@@ -16,4 +16,11 @@ class SessionPrefsTest {
         assertEquals("Sharp", SessionPrefs.presetLabel(99))
         assertEquals("Smooth", SessionPrefs.presetLabel(-1))
     }
+
+    @Test
+    fun presetBitrates() {
+        assertEquals(8_000_000, SessionPrefs.presetQuality(SessionPrefs.PRESET_SMOOTH).bitrate)
+        assertEquals(16_000_000, SessionPrefs.presetQuality(SessionPrefs.PRESET_BALANCED).bitrate)
+        assertEquals(24_000_000, SessionPrefs.presetQuality(SessionPrefs.PRESET_SHARP).bitrate)
+    }
 }

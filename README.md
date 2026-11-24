@@ -175,9 +175,9 @@ without it; this is only for desktop touch and keys.
 
 | preset | bitrate | fps | max size |
 |--------|---------|-----|----------|
-| high-quality (Sharp) | 20 Mbps | 60 | 2560 |
-| balanced | 12 Mbps | 60 | 1920 |
-| low-latency (Smooth) | 6 Mbps | 60 | 1280 |
+| high-quality (Sharp) | 24 Mbps | 60 | native |
+| balanced | 16 Mbps | 60 | 2400 (long side) |
+| low-latency (Smooth) | 8 Mbps | 60 | 1280 |
 | hotspot | 2 Mbps | 30 | 960 |
 
 The preset is the ceiling. Adaptive control moves below it.

@@ -20,17 +20,17 @@ impl Preset {
     pub fn quality(self) -> Quality {
         match self {
             Preset::HighQuality => Quality {
-                bitrate: 20_000_000,
+                bitrate: 24_000_000,
                 fps: 60,
-                max_size: 2560,
+                max_size: 65535,
             },
             Preset::Balanced => Quality {
-                bitrate: 12_000_000,
+                bitrate: 16_000_000,
                 fps: 60,
-                max_size: 1920,
+                max_size: 2400,
             },
             Preset::LowLatency => Quality {
-                bitrate: 6_000_000,
+                bitrate: 8_000_000,
                 fps: 60,
                 max_size: 1280,
             },

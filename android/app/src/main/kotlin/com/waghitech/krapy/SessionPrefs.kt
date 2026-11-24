@@ -42,4 +42,12 @@ object SessionPrefs {
         PRESET_BALANCED -> "Balanced"
         else -> "Sharp"
     }
+
+    data class PresetQuality(val bitrate: Int, val fps: Int, val maxLong: Int)
+
+    fun presetQuality(id: Int): PresetQuality = when (id.coerceIn(PRESET_SMOOTH, PRESET_SHARP)) {
+        PRESET_SMOOTH -> PresetQuality(8_000_000, 60, 1280)
+        PRESET_SHARP -> PresetQuality(24_000_000, 60, 0)
+        else -> PresetQuality(16_000_000, 60, 2400)
+    }
 }
