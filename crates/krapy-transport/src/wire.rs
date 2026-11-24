@@ -90,6 +90,9 @@ pub enum Control {
     RotateView,
     AudioState {
         on: u8,
+        rate: u32,
+        channels: u8,
+        phone_muted: u8,
     },
     Bye,
 }
@@ -354,9 +357,17 @@ pub fn encode_control(c: &Control) -> Result<Vec<u8>, WireError> {
             out.push(*on);
         }
         Control::RotateView => out.push(0x45),
-        Control::AudioState { on } => {
+        Control::AudioState {
+            on,
+            rate,
+            channels,
+            phone_muted,
+        } => {
             out.push(0x46);
             out.push(*on);
+            out.extend_from_slice(&rate.to_le_bytes());
+            out.push(*channels);
+            out.push(*phone_muted);
         }
         Control::Bye => out.push(0x7f),
     }
@@ -499,7 +510,21 @@ pub fn decode_control(buf: &[u8]) -> Result<Control, WireError> {
             if buf.len() < 2 {
                 return Err(WireError::Truncated);
             }
-            Ok(Control::AudioState { on: buf[1] })
+            if buf.len() >= 8 {
+                Ok(Control::AudioState {
+                    on: buf[1],
+                    rate: u32::from_le_bytes(buf[2..6].try_into().expect("len")),
+                    channels: buf[6],
+                    phone_muted: buf[7],
+                })
+            } else {
+                Ok(Control::AudioState {
+                    on: buf[1],
+                    rate: 48_000,
+                    channels: 2,
+                    phone_muted: 0,
+                })
+            }
         }
         0x7f => Ok(Control::Bye),
         _ => Err(WireError::UnknownType),
@@ -743,7 +768,12 @@ mod tests {
             Control::PresetRequest { preset: 1 },
             Control::Paused { on: 1 },
             Control::RotateView,
-            Control::AudioState { on: 0 },
+            Control::AudioState {
+                on: 0,
+                rate: 48_000,
+                channels: 2,
+                phone_muted: 1,
+            },
             Control::Bye,
         ];
         for m in msgs {
@@ -752,6 +782,34 @@ mod tests {
             assert_eq!(dec, m);
         }
         assert_eq!(decode_control(&[0x01]), Err(WireError::Truncated));
+    }
+
+    #[test]
+    fn audio_state_legacy_decode() {
+        let dec = decode_control(&[0x46, 1]).expect("dec");
+        assert_eq!(
+            dec,
+            Control::AudioState {
+                on: 1,
+                rate: 48_000,
+                channels: 2,
+                phone_muted: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn audio_state_extended_roundtrip() {
+        let msg = Control::AudioState {
+            on: 1,
+            rate: 44_100,
+            channels: 2,
+            phone_muted: 1,
+        };
+        let enc = encode_control(&msg).expect("enc");
+        assert_eq!(enc.len(), 8);
+        let dec = decode_control(&enc).expect("dec");
+        assert_eq!(dec, msg);
     }
 
     #[test]

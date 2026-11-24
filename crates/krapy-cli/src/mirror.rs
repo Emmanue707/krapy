@@ -1,5 +1,5 @@
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -247,6 +247,7 @@ fn drive_session(
     let phone_stats = session.phone_stats_cell();
     let clock = session.clock_cell();
     let audio_on = Arc::new(AtomicBool::new(false));
+    let audio_input_rate = Arc::new(AtomicU32::new(48_000));
     let net = {
         let stats_win = Arc::clone(&session.stats_window);
         let control_tx = session.control_tx.clone();
@@ -255,6 +256,7 @@ fn drive_session(
         let counters = Arc::clone(&counters);
         let epoch = Arc::clone(&epoch);
         let audio_on = Arc::clone(&audio_on);
+        let audio_input_rate = Arc::clone(&audio_input_rate);
         let no_audio = opts.no_audio;
         thread::Builder::new()
             .stack_size(SMALL_STACK)
@@ -269,6 +271,7 @@ fn drive_session(
                     counters,
                     epoch,
                     audio_on,
+                    audio_input_rate,
                     no_audio,
                 );
             })
@@ -282,6 +285,7 @@ fn drive_session(
             Arc::clone(&session.audio),
             Arc::clone(&audio_on),
             Arc::clone(&stop),
+            Arc::clone(&audio_input_rate),
         ) {
             Some(a) => Some(a),
             None => {
@@ -361,8 +365,10 @@ fn network_loop(
     counters: Arc<Counters>,
     epoch: Arc<Instant>,
     audio_on: Arc<AtomicBool>,
+    audio_input_rate: Arc<AtomicU32>,
     no_audio: bool,
 ) {
+    static BAD_AUDIO_FMT: Once = Once::new();
     let mut last_stats = Instant::now();
     let mut prev_out = 0u64;
     let mut last_pause: Option<bool> = None;
@@ -395,8 +401,32 @@ fn network_loop(
                     }
                     last_pause = Some(paused);
                 }
-                Control::AudioState { on } if !no_audio => {
-                    audio_on.store(on != 0, Ordering::Relaxed);
+                Control::AudioState {
+                    on,
+                    rate,
+                    channels,
+                    phone_muted,
+                } if !no_audio => {
+                    let want = on != 0;
+                    if want {
+                        let ok = matches!(rate, 48_000 | 44_100) && channels == 2;
+                        if !ok {
+                            BAD_AUDIO_FMT.call_once(|| {
+                                tracing::warn!(
+                                    "unsupported audio format {rate} Hz {channels} ch; audio off"
+                                );
+                            });
+                            audio_on.store(false, Ordering::Relaxed);
+                        } else {
+                            audio_input_rate.store(rate, Ordering::Relaxed);
+                            audio_on.store(true, Ordering::Relaxed);
+                        }
+                    } else {
+                        audio_on.store(false, Ordering::Relaxed);
+                    }
+                    if want && phone_muted == 0 {
+                        println!("phone could not mute its speaker; it may keep playing sound");
+                    }
                 }
                 _ => {}
             }

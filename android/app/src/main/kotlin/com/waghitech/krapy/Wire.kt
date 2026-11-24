@@ -230,7 +230,15 @@ object Wire {
 
     fun encodeRotate(): ByteArray = byteArrayOf(0x45)
 
-    fun encodeAudioState(on: Boolean): ByteArray = byteArrayOf(0x46, if (on) 1 else 0)
+    fun encodeAudioState(on: Boolean, rate: Int, channels: Int, phoneMuted: Boolean): ByteArray {
+        val out = ByteArray(8)
+        out[0] = 0x46
+        out[1] = if (on) 1 else 0
+        putU32Le(out, 2, rate)
+        out[6] = channels.toByte()
+        out[7] = if (phoneMuted) 1 else 0
+        return out
+    }
 
     fun encodeDesktopStats(fps: Int, latencyMs: Int, decodeMs: Int, lossPermille: Int): ByteArray {
         val out = ByteArray(8)
@@ -334,6 +342,13 @@ object Wire {
         out[off + 1] = (v shr 16).toByte()
         out[off + 2] = (v shr 8).toByte()
         out[off + 3] = v.toByte()
+    }
+
+    private fun putU32Le(out: ByteArray, off: Int, v: Int) {
+        out[off] = v.toByte()
+        out[off + 1] = (v shr 8).toByte()
+        out[off + 2] = (v shr 16).toByte()
+        out[off + 3] = (v shr 24).toByte()
     }
 
     private fun putU64(out: ByteArray, off: Int, v: Long) {

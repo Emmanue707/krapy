@@ -92,7 +92,7 @@ highest seen.
 | 0x42 | p->d | PresetRequest | preset u8 (0 smooth, 1 balanced, 2 sharp) |
 | 0x43 | p->d | Paused | on u8 |
 | 0x45 | p->d | RotateView | - |
-| 0x46 | p->d | AudioState | on u8 |
+| 0x46 | p->d | AudioState | on u8, rate u32 le, channels u8, phone_muted u8 (legacy 2-byte: rate 48000, channels 2, phone_muted 0) |
 | 0x7f | both | Bye | - |
 
 ## UDP datagrams (plaintext after opening)
