@@ -31,4 +31,22 @@ class WireRoundtripTest {
         val enc = Wire.encodeDesktopStats(60, 14, 3, 5)
         assertArrayEquals(byteArrayOf(0x41, 60, 0, 14, 0, 3, 0, 5), enc)
     }
+
+    @Test
+    fun settingsEncodeAndSetSettingDecode() {
+        val s = Wire.encodeSettings(
+            paused = true,
+            preset = 1,
+            soundPc = true,
+            keepAwake = false,
+            clipboard = true,
+            rotation = 2,
+        )
+        assertArrayEquals(
+            byteArrayOf(0x49, 1, 1, 1, 0, 1, 2),
+            s,
+        )
+        val set = Wire.decodeControl(byteArrayOf(0x47, PcCommands.KEY_PAUSE.toByte(), 1))
+        assertEquals(Wire.Control.SetSetting(PcCommands.KEY_PAUSE, 1), set)
+    }
 }

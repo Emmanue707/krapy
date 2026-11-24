@@ -92,6 +92,7 @@ object Wire {
             val decodeMs: Int,
             val lossPermille: Int,
         ) : Control()
+        data class SetSetting(val key: Int, val value: Int) : Control()
         data object Bye : Control()
     }
 
@@ -199,6 +200,13 @@ object Wire {
                     lossPermille = u16(buf, 6),
                 )
             }
+            0x47 -> {
+                if (buf.size < 3) throw WireException("truncated set setting")
+                Control.SetSetting(
+                    key = buf[1].toInt() and 0xff,
+                    value = buf[2].toInt() and 0xff,
+                )
+            }
             0x7f -> Control.Bye
             else -> throw WireException("unknown control ${buf[0]}")
         }
@@ -239,6 +247,23 @@ object Wire {
         out[7] = if (phoneMuted) 1 else 0
         return out
     }
+
+    fun encodeSettings(
+        paused: Boolean,
+        preset: Int,
+        soundPc: Boolean,
+        keepAwake: Boolean,
+        clipboard: Boolean,
+        rotation: Int,
+    ): ByteArray = byteArrayOf(
+        0x49,
+        if (paused) 1 else 0,
+        preset.toByte(),
+        if (soundPc) 1 else 0,
+        if (keepAwake) 1 else 0,
+        if (clipboard) 1 else 0,
+        (rotation and 3).toByte(),
+    )
 
     fun encodeDesktopStats(fps: Int, latencyMs: Int, decodeMs: Int, lossPermille: Int): ByteArray {
         val out = ByteArray(8)

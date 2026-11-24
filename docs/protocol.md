@@ -93,6 +93,8 @@ highest seen.
 | 0x43 | p->d | Paused | on u8 |
 | 0x45 | p->d | RotateView | - |
 | 0x46 | p->d | AudioState | on u8, rate u32 le, channels u8, phone_muted u8 (legacy 2-byte: rate 48000, channels 2, phone_muted 0) |
+| 0x47 | d->p | SetSetting | key u8, value u8 (1 pause 0/1, 2 preset 0-2, 3 sound_pc 0/1, 4 keep_awake 0/1, 5 clipboard 0/1, 6 rotate, 7 disconnect) |
+| 0x49 | p->d | Settings | paused u8, preset u8, sound_pc u8, keep_awake u8, clipboard u8, rotation u8 (0-3) |
 | 0x7f | both | Bye | - |
 
 ## UDP datagrams (plaintext after opening)

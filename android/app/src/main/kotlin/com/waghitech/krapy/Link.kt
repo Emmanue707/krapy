@@ -191,6 +191,17 @@ class Link(
     fun sendAudioState(on: Boolean, rate: Int, channels: Int, phoneMuted: Boolean) =
         sendTcpSealed(Wire.encodeAudioState(on, rate, channels, phoneMuted))
 
+    fun sendSettings(
+        paused: Boolean,
+        preset: Int,
+        soundPc: Boolean,
+        keepAwake: Boolean,
+        clipboard: Boolean,
+        rotation: Int,
+    ) = sendTcpSealed(
+        Wire.encodeSettings(paused, preset, soundPc, keepAwake, clipboard, rotation),
+    )
+
     fun sendPhoneStats(encAvgUs: Int, encMaxUs: Int, fps: Int, bitrate: Int) {
         sendTcpSealed(Wire.encodePhoneStats(encAvgUs, encMaxUs, fps, bitrate))
     }

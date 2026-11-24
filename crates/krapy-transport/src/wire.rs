@@ -94,8 +94,28 @@ pub enum Control {
         channels: u8,
         phone_muted: u8,
     },
+    SetSetting {
+        key: u8,
+        value: u8,
+    },
+    Settings {
+        paused: u8,
+        preset: u8,
+        sound_pc: u8,
+        keep_awake: u8,
+        clipboard: u8,
+        rotation: u8,
+    },
     Bye,
 }
+
+pub const SET_KEY_PAUSE: u8 = 1;
+pub const SET_KEY_PRESET: u8 = 2;
+pub const SET_KEY_SOUND_PC: u8 = 3;
+pub const SET_KEY_KEEP_AWAKE: u8 = 4;
+pub const SET_KEY_CLIPBOARD: u8 = 5;
+pub const SET_KEY_ROTATE: u8 = 6;
+pub const SET_KEY_DISCONNECT: u8 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Datagram<'a> {
@@ -369,6 +389,27 @@ pub fn encode_control(c: &Control) -> Result<Vec<u8>, WireError> {
             out.push(*channels);
             out.push(*phone_muted);
         }
+        Control::SetSetting { key, value } => {
+            out.push(0x47);
+            out.push(*key);
+            out.push(*value);
+        }
+        Control::Settings {
+            paused,
+            preset,
+            sound_pc,
+            keep_awake,
+            clipboard,
+            rotation,
+        } => {
+            out.push(0x49);
+            out.push(*paused);
+            out.push(*preset);
+            out.push(*sound_pc);
+            out.push(*keep_awake);
+            out.push(*clipboard);
+            out.push(*rotation);
+        }
         Control::Bye => out.push(0x7f),
     }
     Ok(out)
@@ -525,6 +566,28 @@ pub fn decode_control(buf: &[u8]) -> Result<Control, WireError> {
                     phone_muted: 0,
                 })
             }
+        }
+        0x47 => {
+            if buf.len() < 3 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::SetSetting {
+                key: buf[1],
+                value: buf[2],
+            })
+        }
+        0x49 => {
+            if buf.len() < 7 {
+                return Err(WireError::Truncated);
+            }
+            Ok(Control::Settings {
+                paused: buf[1],
+                preset: buf[2],
+                sound_pc: buf[3],
+                keep_awake: buf[4],
+                clipboard: buf[5],
+                rotation: buf[6],
+            })
         }
         0x7f => Ok(Control::Bye),
         _ => Err(WireError::UnknownType),
@@ -773,6 +836,18 @@ mod tests {
                 rate: 48_000,
                 channels: 2,
                 phone_muted: 1,
+            },
+            Control::SetSetting {
+                key: SET_KEY_PAUSE,
+                value: 1,
+            },
+            Control::Settings {
+                paused: 0,
+                preset: 1,
+                sound_pc: 1,
+                keep_awake: 1,
+                clipboard: 1,
+                rotation: 2,
             },
             Control::Bye,
         ];

@@ -529,6 +529,10 @@ fn tcp_loop(
                     Control::PresetRequest { .. } | Control::AudioState { .. } => {
                         let _ = out.send(msg);
                     }
+                    Control::Settings { paused: on, .. } => {
+                        paused.store(*on != 0, Ordering::Relaxed);
+                        let _ = out.send(msg);
+                    }
                     Control::Bye => {
                         set_end(&end, END_BYE);
                         let _ = out.send(msg);
