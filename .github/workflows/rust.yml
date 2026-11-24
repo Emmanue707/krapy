@@ -13,7 +13,7 @@ jobs:
       - name: system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev libxkbcommon-dev libasound2-dev
+          sudo apt-get install -y --no-install-recommends pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev libxkbcommon-dev libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
