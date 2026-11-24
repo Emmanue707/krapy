@@ -121,12 +121,14 @@ struct AudioState {
 
 pub struct AudioQueue {
     s: Mutex<AudioState>,
+    ready: Condvar,
 }
 
 impl AudioQueue {
     pub fn new() -> Self {
         Self {
             s: Mutex::new(AudioState::default()),
+            ready: Condvar::new(),
         }
     }
 
@@ -144,6 +146,7 @@ impl AudioQueue {
             pts_us,
             data: owned,
         });
+        self.ready.notify_one();
         while s.q.len() > 1 {
             let oldest = s.q.front().expect("f");
             let newest = s.q.back().expect("b");
@@ -162,6 +165,18 @@ impl AudioQueue {
         let Ok(mut s) = self.s.lock() else {
             return None;
         };
+        let pkt = s.q.pop_front()?;
+        let n = pkt.data.len().min(out.len());
+        out[..n].copy_from_slice(&pkt.data[..n]);
+        Some((pkt.seq, pkt.pts_us, n))
+    }
+
+    pub fn pop_wait(&self, timeout: Duration, out: &mut [u8]) -> Option<(u32, u64, usize)> {
+        let s = self.s.lock().ok()?;
+        let (mut s, _) = self
+            .ready
+            .wait_timeout_while(s, timeout, |s| s.q.is_empty())
+            .ok()?;
         let pkt = s.q.pop_front()?;
         let n = pkt.data.len().min(out.len());
         out[..n].copy_from_slice(&pkt.data[..n]);
