@@ -2,11 +2,10 @@ use std::time::{Duration, Instant};
 
 use crate::preset::Quality;
 
-const FLOOR_BITRATE: u32 = 2_000_000;
 const FLOOR_FPS: u8 = 15;
 const FPS_LOW_BITRATE: u32 = 1_500_000;
 const FPS_HIGH_BITRATE: u32 = 2_500_000;
-const STEP_UP_AFTER: Duration = Duration::from_secs(3);
+const STEP_UP_AFTER: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NetStats {
@@ -23,6 +22,7 @@ pub struct Adaptive {
     baseline_rtt_ms: Option<f32>,
     clean_since: Option<Instant>,
     loss_windows: u8,
+    rtt_spike_windows: u8,
 }
 
 impl Adaptive {
@@ -33,6 +33,7 @@ impl Adaptive {
             baseline_rtt_ms: None,
             clean_since: None,
             loss_windows: 0,
+            rtt_spike_windows: 0,
         }
     }
 
@@ -41,10 +42,15 @@ impl Adaptive {
         self.current = ceiling;
         self.clean_since = None;
         self.loss_windows = 0;
+        self.rtt_spike_windows = 0;
     }
 
     pub fn quality(&self) -> Quality {
         self.current
+    }
+
+    fn floor_bitrate(&self) -> u32 {
+        self.ceiling.bitrate / 2
     }
 
     fn update_baseline(&mut self, rtt_ms: f32) {
@@ -75,7 +81,12 @@ impl Adaptive {
         if self.loss_windows >= 2 {
             return true;
         }
-        self.rtt_spike(stats)
+        if self.rtt_spike(stats) {
+            self.rtt_spike_windows = self.rtt_spike_windows.saturating_add(1);
+        } else {
+            self.rtt_spike_windows = 0;
+        }
+        self.rtt_spike_windows >= 2
     }
 
     fn apply_fps_hysteresis(&mut self) {
@@ -87,11 +98,7 @@ impl Adaptive {
     }
 
     fn clamp_floor(&mut self) {
-        let floor = if self.ceiling.bitrate < FLOOR_BITRATE {
-            self.ceiling.bitrate
-        } else {
-            FLOOR_BITRATE
-        };
+        let floor = self.floor_bitrate();
         if self.current.bitrate < floor {
             self.current.bitrate = floor;
         }
@@ -122,6 +129,7 @@ impl Adaptive {
             self.clamp_floor();
             self.clean_since = None;
             self.loss_windows = 0;
+            self.rtt_spike_windows = 0;
         } else {
             match self.clean_since {
                 None => self.clean_since = Some(now),
@@ -198,7 +206,25 @@ mod tests {
     }
 
     #[test]
-    fn up_slow_requires_three_seconds() {
+    fn down_after_two_rtt_spike_windows() {
+        let mut a = Adaptive::new(ceiling());
+        let t0 = Instant::now();
+        let _ = a.on_window(clean_stats(20.0), t0);
+        let spike = NetStats {
+            rtt_ms: 200.0,
+            jitter_ms: 0.0,
+            loss: 0.0,
+            late_frames: 0,
+        };
+        assert!(a.on_window(spike, t0).is_none());
+        assert!(
+            a.on_window(spike, t0 + Duration::from_millis(500))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn up_slow_requires_two_seconds() {
         let mut a = Adaptive::new(ceiling());
         let t0 = Instant::now();
         let _ = a.on_window(
@@ -222,9 +248,9 @@ mod tests {
         let after_down = a.quality().bitrate;
         let t1 = t0 + Duration::from_secs(1);
         let _ = a.on_window(clean_stats(20.0), t1);
-        let q1 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(2));
+        let q1 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(1));
         assert!(q1.is_none());
-        let q2 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(3));
+        let q2 = a.on_window(clean_stats(20.0), t1 + Duration::from_secs(2));
         assert!(q2.is_some());
         assert!(a.quality().bitrate > after_down);
     }
@@ -240,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn floor_bitrate() {
+    fn floor_half_preset() {
         let mut a = Adaptive::new(ceiling());
         let t0 = Instant::now();
         let _ = a.on_window(clean_stats(30.0), t0);
@@ -264,7 +290,7 @@ mod tests {
                 t0,
             );
         }
-        assert!(a.quality().bitrate >= FLOOR_BITRATE);
+        assert!(a.quality().bitrate >= ceiling().bitrate / 2);
         assert!(a.quality().fps >= FLOOR_FPS);
     }
 
@@ -283,11 +309,11 @@ mod tests {
             let _ = a.on_window(bad, t0);
             let _ = a.on_window(bad, t0);
         }
-        assert_eq!(a.quality().bitrate, FLOOR_BITRATE);
+        assert_eq!(a.quality().bitrate, ceiling().bitrate / 2);
 
-        for i in 0..6 {
-            let _ = a.on_window(clean_stats(20.0), t0 + Duration::from_secs(3 * (i + 1)));
+        for i in 0..4 {
+            let _ = a.on_window(clean_stats(20.0), t0 + Duration::from_secs(2 * (i + 1)));
         }
-        assert!(a.quality().bitrate > FLOOR_BITRATE);
+        assert!(a.quality().bitrate > ceiling().bitrate / 2);
     }
 }
