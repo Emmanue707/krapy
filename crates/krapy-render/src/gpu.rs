@@ -1,7 +1,33 @@
+use crate::overlay::OverlayQuad;
 use krapy_decode::{Frame, YuvRgb, yuv_rgb_coeffs};
 use std::mem;
 use std::sync::Arc;
 use winit::window::Window;
+
+const OVERLAY_WGSL: &str = r"
+struct VsOut {
+    @builtin(position) pos: vec4f,
+    @location(0) col: vec4f,
+};
+@vertex
+fn vs_main(@location(0) p: vec2f, @location(1) col: vec4f) -> VsOut {
+    var o: VsOut;
+    o.pos = vec4f(p, 0.0, 1.0);
+    o.col = col;
+    return o;
+}
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4f {
+    return in.col;
+}
+";
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct OverlayVert {
+    pos: [f32; 2],
+    col: [f32; 4],
+}
 
 const SHADER: &str = r"
 struct VsOut {
@@ -205,6 +231,9 @@ pub struct Gpu {
     tex_size: (u32, u32),
     surface_srgb: bool,
     queued_color: Option<krapy_decode::ColorSpec>,
+    overlay_pipeline: Option<wgpu::RenderPipeline>,
+    overlay_vbuf: Option<wgpu::Buffer>,
+    overlay_verts: u32,
 }
 
 pub(crate) struct YuvGfx {
@@ -303,7 +332,129 @@ impl Gpu {
             tex_size: (0, 0),
             surface_srgb,
             queued_color: None,
+            overlay_pipeline: None,
+            overlay_vbuf: None,
+            overlay_verts: 0,
         })
+    }
+
+    fn ensure_overlay(&mut self) {
+        if self.overlay_pipeline.is_some() {
+            return;
+        }
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("overlay"),
+                source: wgpu::ShaderSource::Wgsl(OVERLAY_WGSL.into()),
+            });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("overlay"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("overlay"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: mem::size_of::<OverlayVert>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 0,
+                                format: wgpu::VertexFormat::Float32x2,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 8,
+                                shader_location: 1,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        self.overlay_pipeline = Some(pipeline);
+    }
+
+    pub fn set_overlay_quads(&mut self, quads: &[OverlayQuad], screen_w: f32, screen_h: f32) {
+        if quads.is_empty() {
+            self.overlay_verts = 0;
+            return;
+        }
+        self.ensure_overlay();
+        let mut v = Vec::with_capacity(quads.len() * 6);
+        for q in quads {
+            let rgba = [q.r, q.g, q.b, q.a];
+            let x0 = (q.x / screen_w) * 2.0 - 1.0;
+            let x1 = ((q.x + q.w) / screen_w) * 2.0 - 1.0;
+            let y0 = 1.0 - (q.y / screen_h) * 2.0;
+            let y1 = 1.0 - ((q.y + q.h) / screen_h) * 2.0;
+            v.push(OverlayVert {
+                pos: [x0, y0],
+                col: rgba,
+            });
+            v.push(OverlayVert {
+                pos: [x1, y0],
+                col: rgba,
+            });
+            v.push(OverlayVert {
+                pos: [x0, y1],
+                col: rgba,
+            });
+            v.push(OverlayVert {
+                pos: [x1, y0],
+                col: rgba,
+            });
+            v.push(OverlayVert {
+                pos: [x1, y1],
+                col: rgba,
+            });
+            v.push(OverlayVert {
+                pos: [x0, y1],
+                col: rgba,
+            });
+        }
+        let need = (v.len() * mem::size_of::<OverlayVert>()) as u64;
+        if self.overlay_vbuf.as_ref().is_none_or(|b| b.size() < need) {
+            let size = need.next_power_of_two().max(256);
+            self.overlay_vbuf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("overlay"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buf = self.overlay_vbuf.as_ref().expect("overlay buf");
+        self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&v));
+        self.overlay_verts = v.len() as u32;
+    }
+
+    pub fn clear_overlay(&mut self) {
+        self.overlay_verts = 0;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -469,6 +620,21 @@ impl Gpu {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, 0..1);
+            if self.overlay_verts > 0 {
+                let pip = self.overlay_pipeline.as_ref().expect("overlay");
+                let vbuf = self.overlay_vbuf.as_ref().expect("overlay buf");
+                pass.set_pipeline(pip);
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.draw(0..self.overlay_verts, 0..1);
+            }
         }
         self.queue.submit(Some(enc.finish()));
         surface_frame.present();
