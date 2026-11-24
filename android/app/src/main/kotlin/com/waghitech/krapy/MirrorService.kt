@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.widget.RemoteViews
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -94,7 +95,6 @@ class MirrorService : Service(), LinkCallbacks {
             }
             ACTION_TOGGLE_PAUSE -> {
                 if (running.get()) togglePause()
-                refreshForegroundNotif(false)
                 return START_STICKY
             }
             ACTION_TOGGLE_AUDIO -> {
@@ -621,67 +621,18 @@ class MirrorService : Service(), LinkCallbacks {
     }
 
     private fun refreshForegroundNotif(reconnect: Boolean) {
-        ensureChannel()
-        val openApp = PendingIntent.getActivity(
-            this,
-            2,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val pausePi = PendingIntent.getService(
-            this,
-            3,
-            Intent(this, MirrorService::class.java).setAction(ACTION_TOGGLE_PAUSE),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val soundPi = PendingIntent.getService(
-            this,
-            4,
-            Intent(this, MirrorService::class.java).setAction(ACTION_TOGGLE_AUDIO),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val stopPi = PendingIntent.getService(
-            this,
-            0,
-            Intent(this, MirrorService::class.java).setAction(ACTION_DISCONNECT),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
         val snap = SessionState.snap
-        val text = when {
-            reconnect -> "reconnecting to ${peer?.name ?: "desktop"}"
-            snap.peerName.isNotEmpty() -> NotifFormat.contentText(snap)
-            else -> "mirroring ${peer?.name ?: "desktop"}"
-        }
+        val name = snap.peerName.ifEmpty { peer?.name ?: "desktop" }
         lastNotifSnap = if (reconnect) null else snap
         lastNotifAtMs = System.currentTimeMillis()
-        val notif = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("krapy")
-            .setContentText(text)
-            .setContentIntent(openApp)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .addAction(
-                Notification.Action.Builder(
-                    null,
-                    NotifFormat.pauseActionLabel(paused),
-                    pausePi,
-                ).build(),
-            )
-            .addAction(
-                Notification.Action.Builder(
-                    null,
-                    NotifFormat.soundActionLabel(audioOnPc),
-                    soundPi,
-                ).build(),
-            )
-            .addAction(
-                Notification.Action.Builder(
-                    null,
-                    "Disconnect",
-                    stopPi,
-                ).build(),
-            )
-            .setOngoing(true)
-            .build()
+        val notif = buildSessionNotification(
+            context = this,
+            peerName = name,
+            stats = if (reconnect) "" else NotifFormat.contentText(snap),
+            paused = paused,
+            audioOnPc = audioOnPc,
+            reconnect = reconnect,
+        )
         val types = foregroundServiceTypes()
         if (types == fgTypes) {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIF_ID, notif)
@@ -695,7 +646,6 @@ class MirrorService : Service(), LinkCallbacks {
             }
             fgTypes = types
         } catch (e: Exception) {
-            // android only allows the microphone type while krapy is on screen
             if (micWanted) {
                 micWanted = false
                 audioOnPc = false
@@ -728,6 +678,7 @@ class MirrorService : Service(), LinkCallbacks {
             lk.sendPaused(false)
         }
         SessionState.snap = SessionState.snap.copy(paused = paused)
+        refreshForegroundNotif(false)
     }
 
     private fun toggleAudioFromNotif() {
@@ -806,7 +757,7 @@ class MirrorService : Service(), LinkCallbacks {
     private fun updateNotifStopped(reason: String) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         ensureChannel()
-        val notif = Notification.Builder(this, CHANNEL_ID)
+        val notif = Notification.Builder(this, SESSION_CHANNEL_ID)
             .setContentTitle("krapy")
             .setContentText("session ended: $reason")
             .setSmallIcon(android.R.drawable.ic_menu_view)
@@ -815,13 +766,7 @@ class MirrorService : Service(), LinkCallbacks {
     }
 
     private fun ensureChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "krapy", NotificationManager.IMPORTANCE_LOW),
-            )
-        }
+        ensureSessionChannel(this)
     }
 
     companion object {
@@ -841,8 +786,117 @@ class MirrorService : Service(), LinkCallbacks {
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"
-        private const val CHANNEL_ID = "krapy_mirror"
+        internal const val SESSION_CHANNEL_ID = "krapy_session"
+        private const val LEGACY_CHANNEL_ID = "krapy_mirror"
         private const val NOTIF_ID = 1
+
+        fun sessionNotificationsVisible(context: Context): Boolean {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (!nm.areNotificationsEnabled()) return false
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+            val ch = nm.getNotificationChannel(SESSION_CHANNEL_ID) ?: return true
+            return ch.importance != NotificationManager.IMPORTANCE_NONE
+        }
+
+        fun ensureSessionChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (nm.getNotificationChannel(SESSION_CHANNEL_ID) != null) return
+            nm.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+            val ch = NotificationChannel(
+                SESSION_CHANNEL_ID,
+                "krapy session",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            nm.createNotificationChannel(ch)
+        }
+
+        internal fun buildSessionNotification(
+            context: Context,
+            peerName: String,
+            stats: String,
+            paused: Boolean,
+            audioOnPc: Boolean,
+            reconnect: Boolean,
+        ): Notification {
+            ensureSessionChannel(context)
+            val openApp = PendingIntent.getActivity(
+                context,
+                2,
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val pausePi = PendingIntent.getService(
+                context,
+                3,
+                Intent(context, MirrorService::class.java).setAction(ACTION_TOGGLE_PAUSE),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val soundPi = PendingIntent.getService(
+                context,
+                4,
+                Intent(context, MirrorService::class.java).setAction(ACTION_TOGGLE_AUDIO),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val stopPi = PendingIntent.getService(
+                context,
+                0,
+                Intent(context, MirrorService::class.java).setAction(ACTION_DISCONNECT),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val views = RemoteViews(context.packageName, R.layout.notif_session).apply {
+                setTextViewText(R.id.notif_title, NotifFormat.sessionTitle(peerName, reconnect))
+                setTextViewText(
+                    R.id.notif_stats,
+                    if (reconnect) "…" else stats,
+                )
+                setTextViewText(R.id.notif_btn_pause, NotifFormat.pauseActionLabel(paused))
+                setTextViewText(R.id.notif_btn_sound, NotifFormat.soundActionLabel(audioOnPc))
+                setTextViewText(R.id.notif_btn_disconnect, "Disconnect")
+                setOnClickPendingIntent(R.id.notif_btn_pause, pausePi)
+                setOnClickPendingIntent(R.id.notif_btn_sound, soundPi)
+                setOnClickPendingIntent(R.id.notif_btn_disconnect, stopPi)
+            }
+            val builder = Notification.Builder(context, SESSION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentIntent(openApp)
+                .setCustomContentView(views)
+                .setCustomBigContentView(views)
+                .setStyle(Notification.DecoratedCustomViewStyle())
+                .setOnlyAlertOnce(true)
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setOngoing(true)
+                .addAction(
+                    Notification.Action.Builder(
+                        null,
+                        NotifFormat.pauseActionLabel(paused),
+                        pausePi,
+                    ).build(),
+                )
+                .addAction(
+                    Notification.Action.Builder(
+                        null,
+                        NotifFormat.soundActionLabel(audioOnPc),
+                        soundPi,
+                    ).build(),
+                )
+                .addAction(
+                    Notification.Action.Builder(
+                        null,
+                        "Disconnect",
+                        stopPi,
+                    ).build(),
+                )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+            }
+            return builder.build()
+        }
 
         @Volatile
         var lastDesktopClipboard: String? = null
