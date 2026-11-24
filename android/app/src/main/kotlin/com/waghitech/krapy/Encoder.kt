@@ -8,10 +8,10 @@ import android.os.Bundle
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 class Encoder(
     private val link: Link,
@@ -22,8 +22,10 @@ class Encoder(
     private var width: Int = 0
     private var height: Int = 0
     private var fps: Int = 60
-    private var bitrate: Int = 12_000_000
-    private var maxSize: Int = 1920
+    private var bitrate: Int = 16_000_000
+    private var maxLong: Int = 2400
+    private var displayW: Int = 0
+    private var displayH: Int = 0
     private var frameId: Int = 0
     private val chunkBuf = ByteArray(Wire.MAX_TCP_VIDEO)
     private var drainBuf = ByteArray(64 * 1024)
@@ -37,31 +39,47 @@ class Encoder(
     private var codecConfig: ByteArray? = null
     @Volatile
     private var lastSyncRequestMs: Long = 0
+    @Volatile
+    private var useHighProfile: Boolean = true
+    @Volatile
+    private var pendingBaseline: Boolean = false
+    private var lastOutPtsUs: Long = 0
+    @Volatile
+    private var dropUntilKeyframe: Boolean = false
+    private val sendDrops = AtomicLong(0)
+    private var nominalBitrate: Int = 16_000_000
+    private var delayHighSinceMs: Long = 0
+    private var delayLowSinceMs: Long = 0
+    private var caps: MediaCodecInfo.VideoCapabilities? = null
     var inputSurface: Surface? = null
         private set
 
-    fun scaledSize(displayW: Int, displayH: Int, max: Int): Pair<Int, Int> {
-        val limit = if (max > 0) max else maxSize
-        if (displayW <= limit && displayH <= limit) {
-            return align16(displayW) to align16(displayH)
+    fun scaledSize(displayWIn: Int, displayHIn: Int, max: Int): Pair<Int, Int> {
+        val c = caps
+        val maxL = if (max > 0) max else maxLong
+        val (tw, th) = EncoderPlan.pickLongSideCap(displayWIn, displayHIn, maxL)
+        if (c == null) {
+            return alignLegacy(tw) to alignLegacy(th)
         }
-        val scale = min(limit.toDouble() / displayW, limit.toDouble() / displayH)
-        var w = (displayW * scale).roundToInt()
-        var h = (displayH * scale).roundToInt()
-        w = align16(w)
-        h = align16(h)
-        w = max(16, w)
-        h = max(16, h)
-        return w to h
+        val wa = max(2, c.widthAlignment)
+        val ha = max(2, c.heightAlignment)
+        val sizeOk: (Int, Int) -> Boolean = { w, h ->
+            c.areSizeAndRateSupported(w, h, fps.toDouble())
+        }
+        return EncoderPlan.pickSize(displayWIn, displayHIn, maxL, wa, ha, sizeOk)
     }
 
-    fun start(displayW: Int, displayH: Int, max: Int, fpsIn: Int, bitrateIn: Int) {
+    fun start(displayWIn: Int, displayHIn: Int, max: Int, fpsIn: Int, bitrateIn: Int) {
         stopDrain()
         releaseCodec()
+        displayW = displayWIn
+        displayH = displayHIn
         fps = fpsIn.coerceIn(1, 120)
         bitrate = bitrateIn.coerceAtLeast(100_000)
-        maxSize = if (max > 0) max else maxSize
-        val (w, h) = scaledSize(displayW, displayH, maxSize)
+        nominalBitrate = bitrate
+        maxLong = if (max > 0) max else maxLong
+        loadCaps()
+        val (w, h) = scaledSize(displayW, displayH, maxLong)
         width = w
         height = h
         codec = createCodec(w, h)
@@ -77,36 +95,28 @@ class Encoder(
         stopDrain()
         releaseCodec()
         inputSurface = null
+        caps = null
     }
 
     fun restart(newW: Int, newH: Int, surface: Surface?) {
-        val oldMax = maxSize
+        val oldMax = maxLong
         val oldFps = fps
         val oldBr = bitrate
+        displayW = newW
+        displayH = newH
         stop()
-        if (surface != null) {
-            start(newW, newH, oldMax, oldFps, oldBr)
-            surface.let { s ->
-                // surface replaced via createInputSurface; caller resets VirtualDisplay
-            }
-        } else {
-            start(newW, newH, oldMax, oldFps, oldBr)
-        }
+        start(newW, newH, oldMax, oldFps, oldBr)
         link.sendFormat(width, height)
     }
 
     fun setQuality(bitrateIn: Int, fpsIn: Int, max: Int) {
-        if (max > 0) maxSize = max
+        if (max > 0) maxLong = max
         fps = fpsIn.coerceIn(1, 120)
         bitrate = bitrateIn.coerceAtLeast(100_000)
+        nominalBitrate = bitrate
         val c = codec
         if (c != null) {
-            val b = Bundle()
-            b.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate)
-            try {
-                c.setParameters(b)
-            } catch (_: Exception) {
-            }
+            applyBitrate(c, bitrate)
         }
     }
 
@@ -114,6 +124,8 @@ class Encoder(
         val w = width
         val h = height
         if (w == 0 || h == 0) return
+        pendingBaseline = false
+        lastOutPtsUs = 0
         stopDrain()
         releaseCodec()
         codec = createCodec(w, h)
@@ -126,7 +138,7 @@ class Encoder(
 
     fun requestKeyframe() {
         val now = System.currentTimeMillis()
-        if (now - lastSyncRequestMs < 150) return
+        if (now - lastSyncRequestMs < 300) return
         lastSyncRequestMs = now
         val c = codec ?: return
         val b = Bundle()
@@ -137,9 +149,11 @@ class Encoder(
         }
     }
 
-    fun applyMaxSize(displayW: Int, displayH: Int, max: Int) {
-        maxSize = max
-        val (nw, nh) = scaledSize(displayW, displayH, maxSize)
+    fun applyMaxSize(displayWIn: Int, displayHIn: Int, max: Int) {
+        displayW = displayWIn
+        displayH = displayHIn
+        maxLong = max
+        val (nw, nh) = scaledSize(displayW, displayH, maxLong)
         if (nw == width && nh == height) return
         val br = bitrate
         val f = fps
@@ -155,7 +169,19 @@ class Encoder(
         drainThread = Workers.start("krapy-enc") { drainLoop() }
         fps = f
         bitrate = br
+        nominalBitrate = br
         link.sendFormat(width, height)
+    }
+
+    private fun loadCaps() {
+        caps = try {
+            val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val info = c.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            c.release()
+            info.videoCapabilities
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun createCodec(w: Int, h: Int): MediaCodec {
@@ -164,6 +190,13 @@ class Encoder(
             return configureCodec(w, h, rich = true)
         } catch (e: Exception) {
             lastMsg = e.message ?: e.javaClass.simpleName
+            if (useHighProfile) {
+                useHighProfile = false
+                try {
+                    return configureCodec(w, h, rich = true)
+                } catch (_: Exception) {
+                }
+            }
         }
         try {
             return configureCodec(w, h, rich = false)
@@ -171,8 +204,8 @@ class Encoder(
             lastMsg = e.message ?: e.javaClass.simpleName
         }
         val scale = min(min(720.0 / w, 720.0 / h), 1.0)
-        val rw = align16(max(16, (w * scale).roundToInt()))
-        val rh = align16(max(16, (h * scale).roundToInt()))
+        val rw = alignLegacy(max(16, (w * scale).toInt()))
+        val rh = alignLegacy(max(16, (h * scale).toInt()))
         try {
             return configureCodec(rw, rh, rich = false)
         } catch (e: Exception) {
@@ -198,22 +231,16 @@ class Encoder(
                 } catch (_: Exception) {
                 }
             }
-            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-            format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
-                    format.setInteger(
-                        MediaFormat.KEY_BITRATE_MODE,
-                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
-                    )
+                    format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
                 } catch (_: Exception) {
-                    format.setInteger(
-                        MediaFormat.KEY_BITRATE_MODE,
-                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
-                    )
                 }
             }
-            trySetProfile(format)
+            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+            setBitrateMode(format)
+            trySetProfile(format, w, h)
             trySetLowLatency(format)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 try {
@@ -229,17 +256,51 @@ class Encoder(
         return codec
     }
 
-    private fun trySetProfile(format: MediaFormat) {
+    private fun setBitrateMode(format: MediaFormat) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+        val modeCbFd = 3
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                format.setInteger(MediaFormat.KEY_BITRATE_MODE, modeCbFd)
+                return
+            } catch (_: Exception) {
+            }
+        }
+        try {
+            format.setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
+            )
+        } catch (_: Exception) {
+            try {
+                format.setInteger(
+                    MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun trySetProfile(format: MediaFormat, w: Int, h: Int) {
+        val level = EncoderPlan.pickLevel(w, h, fps)
+        if (useHighProfile) {
+            try {
+                format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+                if (level != null) format.setInteger(MediaFormat.KEY_LEVEL, level)
+                return
+            } catch (_: Exception) {
+            }
+        }
         try {
             format.setInteger(
                 MediaFormat.KEY_PROFILE,
                 MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline,
             )
-            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel42)
+            if (level != null) format.setInteger(MediaFormat.KEY_LEVEL, level)
         } catch (_: Exception) {
             try {
                 format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
             } catch (_: Exception) {
             }
         }
@@ -261,6 +322,7 @@ class Encoder(
     private fun drainLoop() {
         val info = MediaCodec.BufferInfo()
         val c = codec ?: return
+        val frameTimeUs = 1_000_000L / fps.coerceAtLeast(1)
         while (!stop.get()) {
             val idx = try {
                 c.dequeueOutputBuffer(info, 10_000)
@@ -273,7 +335,9 @@ class Encoder(
                     val newFmt = c.outputFormat
                     val csd0 = newFmt.getByteBuffer("csd-0")
                     val csd1 = newFmt.getByteBuffer("csd-1")
-                    if (csd0 != null) codecConfig = annexB(csd0, csd1)
+                    if (csd0 != null) {
+                        codecConfig = annexB(csd0, csd1)
+                    }
                 }
                 idx >= 0 -> {
                     val out = c.getOutputBuffer(idx) ?: continue
@@ -285,7 +349,10 @@ class Encoder(
                         out.position(info.offset)
                         out.limit(info.offset + size)
                         out.get(data, 0, size)
+                        checkOutputOrder(info.presentationTimeUs)
                         val captureUs = captureUs(info.presentationTimeUs)
+                        val encUs = ((System.nanoTime() / 1000) - captureUs).toInt().coerceAtLeast(0)
+                        tickEncodeDelay(encUs, frameTimeUs)
                         if (flags and Wire.VIDEO_FLAG_CODEC_CONFIG != 0) {
                             codecConfig = data.copyOf(size)
                         } else {
@@ -298,11 +365,65 @@ class Encoder(
         }
     }
 
-    private fun sendFrame(data: ByteArray, len: Int, flags: Int, captureUs: Long) {
-        val encUs = ((System.nanoTime() / 1000) - captureUs).toInt().coerceAtLeast(0)
+    private fun tickEncodeDelay(encUs: Int, frameTimeUs: Long) {
         encWindowFrames++
         encWindowSumUs += encUs
         if (encUs > encWindowMaxUs) encWindowMaxUs = encUs
+        val now = System.currentTimeMillis()
+        val late = encUs > frameTimeUs * 2
+        if (late) {
+            if (delayHighSinceMs == 0L) delayHighSinceMs = now
+            delayLowSinceMs = 0
+            if (now - delayHighSinceMs >= 1000) {
+                val next = (bitrate * 0.85).toInt().coerceAtLeast(nominalBitrate / 2)
+                if (next < bitrate) {
+                    bitrate = next
+                    codec?.let { applyBitrate(it, bitrate) }
+                }
+                delayHighSinceMs = now
+            }
+        } else {
+            delayHighSinceMs = 0
+            if (delayLowSinceMs == 0L) delayLowSinceMs = now
+            if (now - delayLowSinceMs >= 1000 && bitrate < nominalBitrate) {
+                val next = min(nominalBitrate, (bitrate * 1.1).toInt())
+                if (next > bitrate) {
+                    bitrate = next
+                    codec?.let { applyBitrate(it, bitrate) }
+                }
+                delayLowSinceMs = now
+            }
+        }
+    }
+
+    private fun applyBitrate(c: MediaCodec, br: Int) {
+        val b = Bundle()
+        b.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, br)
+        try {
+            c.setParameters(b)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun checkOutputOrder(ptsUs: Long) {
+        if (useHighProfile && lastOutPtsUs > 0 && ptsUs < lastOutPtsUs) {
+            // frames came out of order: the encoder reorders in high profile
+            useHighProfile = false
+            pendingBaseline = true
+        }
+        lastOutPtsUs = ptsUs
+    }
+
+    private fun sendFrame(data: ByteArray, len: Int, flags: Int, captureUs: Long) {
+        val ageUs = System.nanoTime() / 1000 - captureUs
+        if (VideoSendGate.tooOld(flags, ageUs) && !dropUntilKeyframe) {
+            dropUntilKeyframe = true
+            requestKeyframe()
+        }
+        if (!VideoSendGate.shouldSend(flags, dropUntilKeyframe)) {
+            sendDrops.incrementAndGet()
+            return
+        }
         val cfg = codecConfig
         if (flags and Wire.VIDEO_FLAG_KEYFRAME != 0 && cfg != null && !Annex.hasSps(data, len)) {
             val total = cfg.size + len
@@ -313,6 +434,7 @@ class Encoder(
         } else {
             sendOneFrame(data, len, flags, captureUs)
         }
+        dropUntilKeyframe = VideoSendGate.onSent(flags, dropUntilKeyframe)
     }
 
     private fun sendOneFrame(data: ByteArray, len: Int, flags: Int, captureUs: Long) {
@@ -343,6 +465,10 @@ class Encoder(
 
     fun encoderStats(): Triple<Int, Int, Int> = Triple(encAvgUs, encMaxUs, fps)
 
+    fun sendDropCount(): Long = sendDrops.get()
+
+    fun needsBaselineRestart(): Boolean = pendingBaseline
+
     private fun mediaFlags(codecFlags: Int): Int {
         var f = 0
         if (codecFlags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
@@ -354,7 +480,6 @@ class Encoder(
         return f
     }
 
-    // surface timestamps are already System.nanoTime based
     private fun captureUs(presentationUs: Long): Long {
         val nowUs = System.nanoTime() / 1000
         return if (abs(nowUs - presentationUs) < 5_000_000) presentationUs else nowUs
@@ -370,7 +495,7 @@ class Encoder(
         return a + sps + a + pps
     }
 
-    private fun align16(v: Int): Int = (v + 15) / 16 * 16
+    private fun alignLegacy(v: Int): Int = (v + 15) / 16 * 16
 
     private fun stopDrain() {
         drainThread?.interrupt()

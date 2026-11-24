@@ -445,7 +445,8 @@ class MirrorService : Service(), LinkCallbacks {
             proj.registerCallback(cb, mainHandler)
         }
         projection = proj
-        enc.start(displayW, displayH, 1920, 60, 12_000_000)
+        val pq = SessionPrefs.presetQuality(SessionPrefs.preset(this))
+        enc.start(displayW, displayH, pq.maxLong, pq.fps, pq.bitrate)
         val surface = enc.inputSurface
         try {
             virtualDisplay = createDisplay(proj, surface, enc.currentWidth(), enc.currentHeight())
@@ -567,6 +568,12 @@ class MirrorService : Service(), LinkCallbacks {
                 val enc = encoder ?: continue
                 val lk = link ?: continue
                 enc.drainEncoderStatsWindow()
+                if (enc.needsBaselineRestart()) {
+                    mainHandler.post {
+                        enc.restartCodecKeepingSurface()
+                        attachVirtualDisplaySurface(enc.inputSurface)
+                    }
+                }
                 val (avg, max, fps) = enc.encoderStats()
                 val br = enc.currentBitrate()
                 lk.sendPhoneStats(avg, max, fps, br)
@@ -703,6 +710,20 @@ class MirrorService : Service(), LinkCallbacks {
         val preset = id.coerceIn(SessionPrefs.PRESET_SMOOTH, SessionPrefs.PRESET_SHARP)
         SessionPrefs.prefs(this).edit().putInt(SessionPrefs.PREF_PRESET, preset).apply()
         link?.sendPreset(preset)
+        val pq = SessionPrefs.presetQuality(preset)
+        encoder?.setQuality(pq.bitrate, pq.fps, pq.maxLong)
+        encoder?.let { enc ->
+            val (nw, nh) = enc.scaledSize(displayW, displayH, pq.maxLong)
+            if (nw != enc.currentWidth() || nh != enc.currentHeight()) {
+                enc.applyMaxSize(displayW, displayH, pq.maxLong)
+                attachVirtualDisplaySurface(enc.inputSurface)
+            }
+            if (enc.needsBaselineRestart()) {
+                enc.restartCodecKeepingSurface()
+                attachVirtualDisplaySurface(enc.inputSurface)
+            }
+            pushInputScale(enc)
+        }
         pushSettings()
     }
 
