@@ -69,6 +69,8 @@ class MirrorService : Service(), LinkCallbacks {
     private var paused = false
     @Volatile
     private var audioOnPc = false
+    @Volatile
+    private var pcRotation = 0
     private var transportLabel = "Wi‑Fi"
     private var lastNotifSnap: SessionState.Snap? = null
     private var lastNotifAtMs = 0L
@@ -102,12 +104,22 @@ class MirrorService : Service(), LinkCallbacks {
                 return START_STICKY
             }
             ACTION_ROTATE -> {
-                link?.sendRotate()
+                if (running.get()) rotatePcViewFromPhone()
                 return START_STICKY
             }
             ACTION_SET_PRESET -> {
                 val id = intent.getIntExtra(EXTRA_PRESET, SessionPrefs.PRESET_BALANCED)
-                link?.sendPreset(id)
+                applyPreset(id)
+                return START_STICKY
+            }
+            ACTION_PAUSE_FROM_PC -> {
+                val on = intent.getIntExtra(EXTRA_VALUE, 0) != 0
+                if (running.get()) setPaused(on)
+                return START_STICKY
+            }
+            ACTION_PRESET_FROM_PC -> {
+                val id = intent.getIntExtra(EXTRA_VALUE, SessionPrefs.PRESET_BALANCED)
+                if (running.get()) applyPreset(id)
                 return START_STICKY
             }
             ACTION_SOUND_PC -> {
@@ -117,15 +129,12 @@ class MirrorService : Service(), LinkCallbacks {
             }
             ACTION_CLIPBOARD -> {
                 val on = intent.getBooleanExtra(EXTRA_BOOL, false)
-                SessionBridge.clipboardSync = on
-                SessionState.clipboardSync = on
-                SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_CLIPBOARD, on).apply()
+                setClipboardSync(on)
                 return START_STICKY
             }
             ACTION_WAKE -> {
                 val on = intent.getBooleanExtra(EXTRA_BOOL, false)
-                SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_KEEP_AWAKE, on).apply()
-                if (on) acquireScreenWake() else releaseScreenWake()
+                setKeepAwake(on)
                 return START_STICKY
             }
             null -> { }
@@ -214,6 +223,7 @@ class MirrorService : Service(), LinkCallbacks {
                 }
                 if (ok && link === lk) {
                     lk.sendPreset(SessionPrefs.preset(this@MirrorService))
+                    pushSettings()
                     if (SessionPrefs.soundOnPc(this@MirrorService)) {
                         startAudioCapture()
                     }
@@ -285,6 +295,7 @@ class MirrorService : Service(), LinkCallbacks {
                     is Wire.Control.Key -> if (InputService.InputBridge.enabled()) InputService.InputBridge.key(c.code)
                     is Wire.Control.Text -> if (InputService.InputBridge.enabled()) InputService.InputBridge.text(c.text)
                     is Wire.Control.Clipboard -> applyDesktopClipboard(c.text)
+                    is Wire.Control.SetSetting -> mainHandler.post { applySettingFromPc(c.key, c.value) }
                     else -> {}
                 }
             } catch (t: Throwable) {
@@ -376,6 +387,7 @@ class MirrorService : Service(), LinkCallbacks {
                     enc.requestKeyframe()
                 }
                 lk.sendPreset(SessionPrefs.preset(this@MirrorService))
+                pushSettings()
                 return
             }
             lk.lastError?.let { problem("can't connect to ${p.name}: $it") }
@@ -665,9 +677,14 @@ class MirrorService : Service(), LinkCallbacks {
     }
 
     private fun togglePause() {
+        setPaused(!paused)
+    }
+
+    private fun setPaused(on: Boolean) {
         val enc = encoder ?: return
         val lk = link ?: return
-        if (!paused) {
+        if (paused == on) return
+        if (on) {
             virtualDisplay?.setSurface(null)
             paused = true
             lk.sendPaused(true)
@@ -679,6 +696,63 @@ class MirrorService : Service(), LinkCallbacks {
         }
         SessionState.snap = SessionState.snap.copy(paused = paused)
         refreshForegroundNotif(false)
+        pushSettings()
+    }
+
+    private fun applyPreset(id: Int) {
+        val preset = id.coerceIn(SessionPrefs.PRESET_SMOOTH, SessionPrefs.PRESET_SHARP)
+        SessionPrefs.prefs(this).edit().putInt(SessionPrefs.PREF_PRESET, preset).apply()
+        link?.sendPreset(preset)
+        pushSettings()
+    }
+
+    private fun setClipboardSync(on: Boolean) {
+        SessionBridge.clipboardSync = on
+        SessionState.clipboardSync = on
+        SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_CLIPBOARD, on).apply()
+        pushSettings()
+    }
+
+    private fun setKeepAwake(on: Boolean) {
+        SessionPrefs.prefs(this).edit().putBoolean(SessionPrefs.PREF_KEEP_AWAKE, on).apply()
+        if (on) acquireScreenWake() else releaseScreenWake()
+        pushSettings()
+    }
+
+    private fun rotatePcViewFromPhone() {
+        pcRotation = (pcRotation + 1) and 3
+        pushSettings()
+    }
+
+    private fun pushSettings() {
+        val lk = link ?: return
+        lk.sendSettings(
+            paused,
+            SessionPrefs.preset(this),
+            audioOnPc,
+            SessionPrefs.keepAwake(this),
+            SessionBridge.clipboardSync,
+            pcRotation,
+        )
+    }
+
+    fun applySettingFromPc(key: Int, value: Int) {
+        if (!running.get()) return
+        val keepAwake = SessionPrefs.keepAwake(this)
+        val clip = SessionBridge.clipboardSync
+        val v = PcCommands.normalizedValue(key, value, paused, audioOnPc, keepAwake, clip)
+        when (key) {
+            PcCommands.KEY_PAUSE -> setPaused(v != 0)
+            PcCommands.KEY_PRESET -> applyPreset(v)
+            PcCommands.KEY_SOUND_PC -> setSoundOnPc(v != 0)
+            PcCommands.KEY_KEEP_AWAKE -> setKeepAwake(v != 0)
+            PcCommands.KEY_CLIPBOARD -> setClipboardSync(v != 0)
+            PcCommands.KEY_ROTATE -> {
+                pcRotation = (pcRotation + 1) and 3
+                pushSettings()
+            }
+            PcCommands.KEY_DISCONNECT -> stopSession("desktop disconnect")
+        }
     }
 
     private fun toggleAudioFromNotif() {
@@ -695,6 +769,7 @@ class MirrorService : Service(), LinkCallbacks {
             stopAudioCapture()
         }
         refreshForegroundNotif(false)
+        pushSettings()
     }
 
     private fun startAudioCapture() {
@@ -779,8 +854,11 @@ class MirrorService : Service(), LinkCallbacks {
         const val ACTION_SOUND_PC = "com.waghitech.krapy.SOUND_PC"
         const val ACTION_CLIPBOARD = "com.waghitech.krapy.CLIPBOARD"
         const val ACTION_WAKE = "com.waghitech.krapy.WAKE"
+        const val ACTION_PAUSE_FROM_PC = "com.waghitech.krapy.PAUSE_FROM_PC"
+        const val ACTION_PRESET_FROM_PC = "com.waghitech.krapy.PRESET_FROM_PC"
         const val EXTRA_PRESET = "preset"
         const val EXTRA_BOOL = "on"
+        const val EXTRA_VALUE = "value"
         const val EXTRA_PEER_ID = "peer_id"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
