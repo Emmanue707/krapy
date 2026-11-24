@@ -57,6 +57,8 @@ class MainActivity : Activity() {
     private var wakeSwitch: Switch? = null
     private var clipSwitch: Switch? = null
     private var pauseButton: Button? = null
+    private var notifOffBlock: LinearLayout? = null
+    private var notifPermissionAsked = false
     private var presetSmooth: Button? = null
     private var presetBalanced: Button? = null
     private var presetSharp: Button? = null
@@ -168,7 +170,6 @@ class MainActivity : Activity() {
         }
         refreshList()
         handleViewIntent(intent)
-        maybeRequestNotif()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -292,14 +293,6 @@ class MainActivity : Activity() {
                 sendServiceBool(MirrorService.ACTION_SOUND_PC, true)
             }
         }
-    }
-
-    private fun maybeRequestNotif() {
-        if (Build.VERSION.SDK_INT < 33) return
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
     }
 
     private fun startScan() {
@@ -465,15 +458,6 @@ class MainActivity : Activity() {
         portOverride: Int? = null,
     ) {
         try {
-            if (Build.VERSION.SDK_INT >= 33 &&
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-            ) {
-                pendingPeer = peer
-                pendingHostOverride = hostOverride
-                pendingPortOverride = portOverride
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
-                return
-            }
             beginCapture(peer, hostOverride, portOverride)
         } catch (t: Throwable) {
             CrashLog.record(this, t, "startMirroring")
@@ -561,6 +545,30 @@ class MainActivity : Activity() {
             setPadding(0, dp(4), 0, dp(8))
         }
         card.addView(connectedStats)
+        notifOffBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        notifOffBlock?.addView(TextView(this).apply {
+            text =
+                "Notifications are off, so pause and disconnect are only here. Turn on"
+            textSize = 13f
+            setTextColor(textSecondary())
+        })
+        notifOffBlock?.addView(secondaryButton("Turn on") {
+            startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                },
+            )
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(4) }
+        })
+        card.addView(notifOffBlock)
         card.addView(labelRow("Quality"))
         val presetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         presetSmooth = presetChip(presetRow, "Smooth", SessionPrefs.PRESET_SMOOTH)
@@ -709,6 +717,8 @@ class MainActivity : Activity() {
         val sound = SessionState.audioOnPc
         if (soundSwitch?.isChecked != sound) soundSwitch?.isChecked = sound
         clipSwitch?.isChecked = SessionBridge.clipboardSync
+        notifOffBlock?.visibility =
+            if (MirrorService.sessionNotificationsVisible(this)) View.GONE else View.VISIBLE
     }
 
     private fun beginCapture(
@@ -720,6 +730,15 @@ class MainActivity : Activity() {
             pendingPeer = peer
             pendingHostOverride = hostOverride
             pendingPortOverride = portOverride
+            if (Build.VERSION.SDK_INT >= 33 && !notifPermissionAsked) {
+                notifPermissionAsked = true
+                if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+                    return
+                }
+            }
             val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
         } catch (t: Throwable) {
