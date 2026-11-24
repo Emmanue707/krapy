@@ -11,7 +11,7 @@ use krapy_core::adaptive::Adaptive;
 use krapy_core::device::{PairedDevice, Store};
 use krapy_core::preset::{Preset, Quality};
 use krapy_decode::{Decoder, open};
-use krapy_render::FrameSource;
+use krapy_render::{FrameSource, MenuStats, PhoneSettings};
 use krapy_transport::{AcceptMode, Control, FrameQueue, Listener, Session, SessionError};
 
 const PAIR_WINDOW: Duration = Duration::from_secs(300);
@@ -239,6 +239,9 @@ fn drive_session(
         fps: ceiling.fps,
         max_size: ceiling.max_size,
     });
+    if !opts.no_window {
+        println!("Alt+M menu, Alt+P pause, Alt+D disconnect");
+    }
     let stats_stop = Arc::new(AtomicBool::new(false));
 
     let stop = session.stop_flag();
@@ -257,6 +260,7 @@ fn drive_session(
         let epoch = Arc::clone(&epoch);
         let audio_on = Arc::clone(&audio_on);
         let audio_input_rate = Arc::clone(&audio_input_rate);
+        let phone_stats = Arc::clone(&phone_stats);
         let no_audio = opts.no_audio;
         thread::Builder::new()
             .stack_size(SMALL_STACK)
@@ -272,6 +276,7 @@ fn drive_session(
                     epoch,
                     audio_on,
                     audio_input_rate,
+                    phone_stats,
                     no_audio,
                 );
             })
@@ -366,12 +371,14 @@ fn network_loop(
     epoch: Arc<Instant>,
     audio_on: Arc<AtomicBool>,
     audio_input_rate: Arc<AtomicU32>,
+    phone_stats: Arc<Mutex<krapy_transport::PhoneStatsSnap>>,
     no_audio: bool,
 ) {
     static BAD_AUDIO_FMT: Once = Once::new();
     let mut last_stats = Instant::now();
     let mut prev_out = 0u64;
     let mut last_pause: Option<bool> = None;
+    let mut menu_bitrate = counters.bitrate.load(Ordering::Relaxed) as u32;
     while !stop.load(Ordering::Relaxed) {
         while let Ok(msg) = control_rx.try_recv() {
             match msg {
@@ -402,6 +409,15 @@ fn network_loop(
                     source.set_paused(paused);
                     last_pause = Some(paused);
                 }
+                Control::Settings { .. } => {
+                    if let Some(s) = PhoneSettings::from_control(&msg) {
+                        source.set_phone_settings(s);
+                        if !no_audio {
+                            audio_on.store(s.sound_pc, Ordering::Relaxed);
+                        }
+                        last_pause = Some(s.paused);
+                    }
+                }
                 Control::AudioState {
                     on,
                     rate,
@@ -428,6 +444,9 @@ fn network_loop(
                     if want && phone_muted == 0 {
                         println!("phone could not mute its speaker; it may keep playing sound");
                     }
+                }
+                Control::PhoneStats { bitrate, .. } => {
+                    menu_bitrate = bitrate;
                 }
                 _ => {}
             }
@@ -456,6 +475,17 @@ fn network_loop(
                 latency_ms,
                 decode_ms,
                 loss_permille,
+            });
+            let bitrate_bps = phone_stats
+                .lock()
+                .ok()
+                .map(|p| p.bitrate)
+                .unwrap_or(menu_bitrate);
+            source.set_menu_stats(MenuStats {
+                fps,
+                latency_ms,
+                decode_ms,
+                bitrate_bps,
             });
             let _ = epoch;
         }

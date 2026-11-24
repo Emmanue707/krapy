@@ -8,12 +8,16 @@ pub enum Wake {
     PhoneClipboard,
     Rotate,
     Pause(bool),
+    Settings,
+    Stats,
 }
 
 struct Inner {
     frame: Mutex<Option<Frame>>,
     phone_clipboard: Mutex<Option<String>>,
     proxy: Mutex<Option<EventLoopProxy<Wake>>>,
+    settings: Mutex<crate::overlay::PhoneSettings>,
+    stats: Mutex<crate::overlay::MenuStats>,
 }
 
 #[derive(Clone)]
@@ -34,7 +38,39 @@ impl FrameSource {
                 frame: Mutex::new(None),
                 phone_clipboard: Mutex::new(None),
                 proxy: Mutex::new(None),
+                settings: Mutex::new(crate::overlay::PhoneSettings::default()),
+                stats: Mutex::new(crate::overlay::MenuStats::default()),
             }),
+        }
+    }
+
+    pub fn set_phone_settings(&self, s: crate::overlay::PhoneSettings) {
+        if let Ok(mut g) = self.inner.settings.lock() {
+            *g = s;
+        }
+        self.poke(Wake::Settings);
+    }
+
+    pub fn phone_settings(&self) -> crate::overlay::PhoneSettings {
+        self.inner.settings.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    pub fn set_menu_stats(&self, s: crate::overlay::MenuStats) {
+        if let Ok(mut g) = self.inner.stats.lock() {
+            *g = s;
+        }
+        self.poke(Wake::Stats);
+    }
+
+    pub fn menu_stats(&self) -> crate::overlay::MenuStats {
+        self.inner.stats.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    fn poke(&self, wake: Wake) {
+        if let Ok(guard) = self.inner.proxy.lock()
+            && let Some(p) = guard.as_ref()
+        {
+            let _ = p.send_event(wake);
         }
     }
 

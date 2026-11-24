@@ -1,16 +1,21 @@
 use crate::gpu::Gpu;
-use crate::keys::{self, KEY_BACK, KEY_HOME};
+use crate::keys::{self, KEY_BACK, KEY_HOME, UiAction};
 use crate::letterbox::{display_scale, effective_video, letterbox_viewport, window_to_video};
 use crate::mailbox::{FrameSource, Wake};
+use crate::overlay::{
+    OverlayQuad, PhoneSettings, build_menu_quads, build_paused_tag, hit_test, panel_layout,
+    point_in_panel, row_action,
+};
 use krapy_decode::Frame;
 use krapy_transport::Control;
+use krapy_transport::wire::SET_KEY_ROTATE;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 pub struct KrapyApp {
@@ -26,6 +31,10 @@ pub struct KrapyApp {
     last_frame: Option<Frame>,
     cursor: Option<(f32, f32)>,
     rotation: u8,
+    settings: PhoneSettings,
+    menu_open: bool,
+    overlay_quads: Vec<OverlayQuad>,
+    synced_rotation: bool,
 }
 
 impl KrapyApp {
@@ -43,6 +52,10 @@ impl KrapyApp {
             last_frame: None,
             cursor: None,
             rotation: 0,
+            settings: PhoneSettings::default(),
+            menu_open: false,
+            overlay_quads: Vec::new(),
+            synced_rotation: false,
         }
     }
 
@@ -80,6 +93,53 @@ impl KrapyApp {
         let w_log = target_h * aspect;
         let _ = w.request_inner_size(LogicalSize::new(w_log, target_h));
         self.sized = true;
+    }
+
+    fn refresh_title(&self) {
+        let Some(w) = &self.window else {
+            return;
+        };
+        let base = format!("krapy - {}", self.device_name);
+        let title = if self.settings.paused {
+            format!("{base} - paused")
+        } else {
+            base
+        };
+        w.set_title(&title);
+    }
+
+    fn pull_settings(&mut self) {
+        let s = self.source.phone_settings();
+        if s.rotation != self.rotation && self.synced_rotation {
+            self.rotation = s.rotation;
+        }
+        if !self.synced_rotation && s.rotation <= 3 {
+            self.rotation = s.rotation;
+            self.synced_rotation = true;
+        }
+        self.settings = s;
+        self.refresh_title();
+    }
+
+    fn rebuild_overlay(&mut self) {
+        let Some((ww, wh, _, _)) = self.win_metrics() else {
+            return;
+        };
+        if self.menu_open {
+            let stats = self.source.menu_stats();
+            build_menu_quads(&mut self.overlay_quads, &self.settings, &stats, ww, wh);
+        } else if self.settings.paused {
+            build_paused_tag(&mut self.overlay_quads, ww, wh);
+        } else {
+            self.overlay_quads.clear();
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if self.overlay_quads.is_empty() {
+                gpu.clear_overlay();
+            } else {
+                gpu.set_overlay_quads(&self.overlay_quads, ww, wh);
+            }
+        }
     }
 
     fn redraw(&mut self) {
@@ -121,6 +181,32 @@ impl KrapyApp {
             y,
         });
     }
+
+    fn local_rotate(&mut self) {
+        self.rotation = self.rotation.wrapping_add(1) & 3;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.rebuild_overlay();
+    }
+
+    fn apply_setting(&mut self, mut ctrl: Control) {
+        ctrl = keys::resolve_toggle_setting(ctrl, &self.settings);
+        if let Control::SetSetting { key, .. } = ctrl
+            && key == SET_KEY_ROTATE
+        {
+            self.local_rotate();
+        }
+        self.send(ctrl);
+    }
+
+    fn toggle_menu(&mut self) {
+        self.menu_open = !self.menu_open;
+        self.rebuild_overlay();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler<Wake> for KrapyApp {
@@ -136,6 +222,8 @@ impl ApplicationHandler<Wake> for KrapyApp {
         let gpu = Gpu::new(window.clone()).expect("gpu");
         self.window = Some(window);
         self.gpu = Some(gpu);
+        self.pull_settings();
+        self.rebuild_overlay();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -149,8 +237,10 @@ impl ApplicationHandler<Wake> for KrapyApp {
                 }
             }
             Wake::PhoneClipboard => self.apply_phone_clipboard(),
-            Wake::Rotate => {
-                self.rotation = self.rotation.wrapping_add(1) & 3;
+            Wake::Rotate => self.local_rotate(),
+            Wake::Settings => {
+                self.pull_settings();
+                self.rebuild_overlay();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -160,6 +250,14 @@ impl ApplicationHandler<Wake> for KrapyApp {
                     let base = format!("krapy - {}", self.device_name);
                     let title = if on { format!("{base} (paused)") } else { base };
                     w.set_title(&title);
+                }
+            }
+            Wake::Stats => {
+                if self.menu_open {
+                    self.rebuild_overlay();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
         }
@@ -173,6 +271,7 @@ impl ApplicationHandler<Wake> for KrapyApp {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
+                self.rebuild_overlay();
             }
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(m) => {
@@ -198,13 +297,23 @@ impl KrapyApp {
         if event.state != ElementState::Pressed || event.repeat {
             return;
         }
-        if self.modifiers.control_key()
-            && matches!(event.logical_key, Key::Character(ref s) if s.eq_ignore_ascii_case("r"))
-        {
-            self.rotation = self.rotation.wrapping_add(1) & 3;
-            if let Some(w) = &self.window {
-                w.request_redraw();
+        if self.menu_open && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.menu_open = false;
+            self.rebuild_overlay();
+            return;
+        }
+        if let Some(act) = keys::pc_shortcut(&event, self.modifiers) {
+            match act {
+                UiAction::ToggleMenu => self.toggle_menu(),
+                UiAction::LocalRotate => self.apply_setting(Control::SetSetting {
+                    key: SET_KEY_ROTATE,
+                    value: 0,
+                }),
+                UiAction::Setting(c) => self.apply_setting(c),
             }
+            return;
+        }
+        if keys::consumes_pc_shortcut(&event, self.modifiers) {
             return;
         }
         if self.modifiers.control_key()
@@ -231,6 +340,22 @@ impl KrapyApp {
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        if self.menu_open
+            && button == MouseButton::Left
+            && state == ElementState::Pressed
+            && let Some((px, py)) = self.cursor
+        {
+            let (ww, wh, _, _) = self.win_metrics().unwrap_or((800.0, 600.0, 0, 0));
+            let layout = panel_layout(ww, wh);
+            if point_in_panel(px, py, &layout) {
+                if let Some(row) = hit_test(px, py, &layout)
+                    && let Some(ctrl) = row_action(row, &self.settings)
+                {
+                    self.apply_setting(ctrl);
+                }
+                return;
+            }
+        }
         match button {
             MouseButton::Left => {
                 self.pointer_down = state == ElementState::Pressed;

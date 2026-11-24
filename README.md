@@ -137,6 +137,20 @@ Useful flags: `--preset high-quality|balanced|low-latency|hotspot`,
 
 ## While connected
 
+On the PC mirror window (`krapy connect`):
+
+| shortcut | action |
+|----------|--------|
+| Alt+M or F1 | show / hide control menu |
+| Alt+P | pause / resume |
+| Alt+1 / Alt+2 / Alt+3 | Smooth / Balanced / Sharp |
+| Alt+S | sound on PC or phone |
+| Alt+K | keep phone screen awake |
+| Alt+B | clipboard sync |
+| Alt+R | rotate PC view (Ctrl+R rotates locally only) |
+| Alt+D | disconnect |
+| Esc | close menu when open |
+
 On the phone, the krapy home screen shows live stats and controls when mirroring:
 quality (Smooth / Balanced / Sharp), pause, rotate the PC window, sound on PC
 or phone, keep the screen awake, clipboard sync, and disconnect. The
