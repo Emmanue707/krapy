@@ -155,6 +155,13 @@ impl ApplicationHandler<Wake> for KrapyApp {
                     w.request_redraw();
                 }
             }
+            Wake::Pause(on) => {
+                if let Some(w) = self.window.as_ref() {
+                    let base = format!("krapy - {}", self.device_name);
+                    let title = if on { format!("{base} (paused)") } else { base };
+                    w.set_title(&title);
+                }
+            }
         }
         let _ = event_loop;
     }

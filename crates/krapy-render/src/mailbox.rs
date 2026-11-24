@@ -7,6 +7,7 @@ pub enum Wake {
     NewFrame,
     PhoneClipboard,
     Rotate,
+    Pause(bool),
 }
 
 struct Inner {
@@ -45,6 +46,14 @@ impl FrameSource {
             && let Some(p) = guard.as_ref()
         {
             let _ = p.send_event(Wake::NewFrame);
+        }
+    }
+
+    pub fn set_paused(&self, on: bool) {
+        if let Ok(guard) = self.inner.proxy.lock()
+            && let Some(p) = guard.as_ref()
+        {
+            let _ = p.send_event(Wake::Pause(on));
         }
     }
 

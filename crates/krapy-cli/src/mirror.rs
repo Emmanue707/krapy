@@ -399,6 +399,7 @@ fn network_loop(
                             }
                         }
                     }
+                    source.set_paused(paused);
                     last_pause = Some(paused);
                 }
                 Control::AudioState {
